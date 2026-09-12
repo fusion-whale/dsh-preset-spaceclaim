@@ -1,0 +1,3 @@
+name: SpaceClaim 建模
+description: 标准模式 + Ansys SpaceClaim 参数化建模：命令行后台建几何、命名边界（inlet/outlet/wall）、独立校验，产出可直接进 CFD 前处理的 .scdocx。
+order: 50

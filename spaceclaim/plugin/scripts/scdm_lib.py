@@ -1,0 +1,532 @@
+# -*- coding: utf-8 -*-
+# =====================================================================
+#  scdm_lib.py —— SpaceClaim 建模辅助库
+#
+#  这个文件不会单独运行：Invoke-Scdm.ps1 会把它的内容“注入”到你的建模脚本
+#  最前面，所以建模脚本里可以直接调用下面的函数，不需要 import。
+#
+#  单位约定：对外接口一律用毫米(mm)，内部自动换算成 SpaceClaim 的米。
+#
+#  在 SpaceClaim 脚本宿主里，MM / Point / BlockBody / NamedSelection /
+#  Selection / DocumentSave 等名字已经由宿主预加载，无需 import。
+# =====================================================================
+
+# ---------------------------------------------------------------------------
+# 文档
+# ---------------------------------------------------------------------------
+
+def new_model():
+    """新建一个空文档，返回根零件。想在会话里强制开新文档时调用。"""
+    DocumentHelper.CreateNewDocument()
+    return GetRootPart()
+
+
+def root_part():
+    """当前文档的根零件。"""
+    return GetRootPart()
+
+
+def ensure_document():
+    """确保有可用的文档：已经有就复用，没有就新建。
+
+    box()/cylinder() 会先调用它，所以脚本里不写 new_model() 也能跑起来。
+    """
+    try:
+        part = GetRootPart()
+        if part is not None:
+            return part
+    except:
+        pass
+    return new_model()
+
+
+# ---------------------------------------------------------------------------
+# 建几何体（单位：mm）
+# ---------------------------------------------------------------------------
+
+def _extrude_type(cut, separate=False):
+    """把 cut/separate 两个开关翻译成 ExtrudeType，都不用时返回 None。
+
+    cut=True      -> ExtrudeType.Cut             布尔减（挖掉这块）
+    separate=True -> ExtrudeType.ForceIndependent 即使与已有体重叠也单独成一个体
+
+    实测行为：默认（不传 ExtrudeType）时，新建的体如果与已有体重叠，会被**合并**
+    （并集）进已有体——所以"在一个实体内部再建一个流体域"必须用 separate=True。
+
+    注意：不能用“显式传 None 占位”的写法——把 None 塞进带默认值的参数位，
+    实测会让 SpaceClaim 脚本宿主直接中止整个脚本（连 traceback 都没有）。
+    所以这里返回 None 时，调用方要换成一个少传参数的重载。
+    """
+    if cut and separate:
+        raise ValueError("cut 和 separate 不能同时为 True")
+    if cut:
+        return ExtrudeType.Cut
+    if separate:
+        return ExtrudeType.ForceIndependent
+    return None
+
+
+def _created_body(res):
+    """从命令结果里取新建/被修改的体；不同命令的成员名不一样。
+
+    兜底：如果结果对象取不到体（例如新体与已有体发生了合并/相加），
+    就取根零件里最后一个体——对“新建”语义来说它就是刚生成（或被改）的那个。
+    """
+    try:
+        b = res.CreatedBody
+        if b is not None:
+            return b
+    except:
+        pass
+    try:
+        bodies = res.CreatedBodies
+        if bodies is not None and bodies.Count > 0:
+            return bodies[0]
+    except:
+        pass
+    try:
+        bodies = list(GetRootPart().Bodies)
+        if bodies:
+            return bodies[len(bodies) - 1]
+    except:
+        pass
+    return None
+
+
+def box(width, depth=None, height=None, origin=(0.0, 0.0, 0.0), name="Body",
+        cut=False, separate=False):
+    """长方体。
+
+    width  -> X 方向尺寸
+    depth  -> Y 方向尺寸（省略则与 width 相同）
+    height -> Z 方向尺寸（省略则与 width 相同）
+    origin -> 起始角点坐标 (x, y, z)，单位 mm
+    cut    -> True 时做布尔减（从已有实体上挖掉这块长方体）
+    separate -> True 时即使与已有体重叠也保持独立（默认重叠会被合并）
+    """
+    if depth is None:
+        depth = width
+    if height is None:
+        height = width
+    ensure_document()
+    x0, y0, z0 = origin
+    p1 = Point.Create(MM(x0), MM(y0), MM(z0))
+    p2 = Point.Create(MM(x0 + width), MM(y0 + depth), MM(z0 + height))
+    et = _extrude_type(cut, separate)
+    res = BlockBody.Create(p1, p2) if et is None else BlockBody.Create(p1, p2, et)
+    body = _created_body(res)
+    if name and not cut and body is not None:
+        try:
+            body.Name = name
+        except:
+            pass
+    return body
+
+
+def cylinder(radius, height, origin=(0.0, 0.0, 0.0), axis="z", name="Body",
+             cut=False, separate=False):
+    """圆柱：底面圆心在 origin，轴向沿 axis（"x"/"y"/"z"），高 height。单位 mm。
+
+    CylinderBody.Create 的三个点（实测反推 + 官方 Example9 印证）：
+        定义圆圆心 / 另一底面圆心（决定轴向与长度） / 另一底面圆周上一点（决定半径）
+    注意不是“圆周上一点定半径、另一点定端点”，弄反会得到一个轴向和半径都错的圆柱。
+
+    cut=True 时做布尔减：这个圆柱会从已有实体上被挖掉（实测可挖出通孔，
+    孔壁会成为一个独立的圆柱面，端面上出现第 2 个 loop）。
+    """
+    x0, y0, z0 = origin
+    a = axis.lower()
+    ensure_document()
+    c = Point.Create(MM(x0), MM(y0), MM(z0))
+    if a == "x":
+        start = Point.Create(MM(x0 + height), MM(y0), MM(z0))
+        end = Point.Create(MM(x0 + height), MM(y0 + radius), MM(z0))
+    elif a == "y":
+        start = Point.Create(MM(x0), MM(y0 + height), MM(z0))
+        end = Point.Create(MM(x0), MM(y0 + height), MM(z0 + radius))
+    else:
+        start = Point.Create(MM(x0), MM(y0), MM(z0 + height))
+        end = Point.Create(MM(x0 + radius), MM(y0), MM(z0 + height))
+    et = _extrude_type(cut, separate)
+    res = CylinderBody.Create(c, start, end) if et is None else CylinderBody.Create(c, start, end, et)
+    # 注意：CylinderBodyResult 只有 CreatedBodies，没有 CreatedBody
+    #（BlockBodyResult / SphereResult 才两个都有），取错会得到
+    # "Script failed: 'CylinderBodyResult' object has no attribute 'CreatedBody'"
+    body = _created_body(res)
+    if name and not cut and body is not None:
+        try:
+            body.Name = name
+        except:
+            pass
+    return body
+
+
+def move(body, dx=0.0, dy=0.0, dz=0.0):
+    """把实体整体平移 (dx, dy, dz)，单位 mm。返回同一个体对象。
+
+    实测：Move.Translate(Selection.Create(body), Vector.Create(...), MoveOptions())
+    可用（Vector.Create 接受内部单位，所以外面套 MM()）。
+    """
+    if body is None:
+        raise ValueError("move(): body is None")
+    if dx == 0.0 and dy == 0.0 and dz == 0.0:
+        return body
+    vec = Vector.Create(MM(dx), MM(dy), MM(dz))
+    Move.Translate(Selection.Create(body), vec, MoveOptions())
+    return body
+
+
+def tube(outer_radius, inner_radius, height, origin=(0.0, 0.0, 0.0), axis="z",
+         name="Pipe", overshoot=1.0):
+    """空心圆管：外圆柱 + 内圆柱布尔减。
+
+    overshoot 是内圆柱两端各多伸出的长度(mm)，保证把管壁切穿干净。
+    返回外圆柱那个体（布尔减之后它就是管体本身）。
+    """
+    if inner_radius >= outer_radius:
+        raise ValueError("tube(): inner_radius 必须小于 outer_radius")
+    a = axis.lower()
+    outer = cylinder(outer_radius, height, origin=origin, axis=a, name=name)
+    x0, y0, z0 = origin
+    if a == "x":
+        cut_origin = (x0 - overshoot, y0, z0)
+    elif a == "y":
+        cut_origin = (x0, y0 - overshoot, z0)
+    else:
+        cut_origin = (x0, y0, z0 - overshoot)
+    cylinder(inner_radius, height + 2.0 * overshoot, origin=cut_origin, axis=a, cut=True)
+    return outer
+
+
+def stepped_cone(radius1, radius2, height, segments=8, origin=(0.0, 0.0, 0.0),
+                 axis="z", name="Cone"):
+    """阶梯锥：用 segments 段同轴圆柱近似一个圆锥台。
+
+    半径从 radius1（起点端）线性变到 radius2（终点端），单位 mm。
+    实测可用：5 段时合并成 1 个体、11 个面（5 个柱面 + 2 个端面 + 4 个内部台阶环面）。
+    真锥台（放样）在脚本 API 里做不出来，见 references/api-notes.md。
+    """
+    segs = int(segments)
+    if segs < 1:
+        raise ValueError("stepped_cone(): segments 至少为 1")
+    a = axis.lower()
+    x0, y0, z0 = origin
+    step = float(height) / segs
+
+    def base_pt(t):
+        return Point.Create(MM(x0 + (t if a == "x" else 0.0)),
+                            MM(y0 + (t if a == "y" else 0.0)),
+                            MM(z0 + (t if a == "z" else 0.0)))
+
+    def rim_pt(t, r):
+        return Point.Create(MM(x0 + (t if a == "x" else 0.0) + (r if a == "y" else 0.0)),
+                            MM(y0 + (t if a == "y" else 0.0) + (r if a == "z" else 0.0)),
+                            MM(z0 + (t if a == "z" else 0.0) + (r if a == "x" else 0.0)))
+
+    ensure_document()
+    body = None
+    for i in range(segs):
+        rr = radius1 + (radius2 - radius1) * (i / float(segs))
+        p1 = base_pt(i * step)
+        p2 = base_pt((i + 1) * step)
+        p3 = rim_pt((i + 1) * step, rr)
+        if i == 0:
+            body = _created_body(CylinderBody.Create(p1, p2, p3))
+        else:
+            # 关键：后续段必须用 ExtrudeType.Add 才会和上一段合并成一个体
+            CylinderBody.Create(p1, p2, p3, ExtrudeType.Add)
+    if name and body is not None:
+        try:
+            body.Name = name
+        except:
+            pass
+    return body
+
+
+def extrude_circle(radius, height, center2d=(0.0, 0.0), name="Body", cut=False):
+    """用“草图圆 -> 拉伸”造一个实体圆（走 草图 -> Solid 模式 -> ExtrudeFaces）。
+
+    实测要点（这几条都踩过）：
+      * 草图必须用 SketchCircle.Create(Point2D, 半径) 这个重载；带显式 Plane 的
+        重载在 Solid 模式下不会形成可拉伸的面（实测 bodies 仍是 0）。
+      * 拉伸方向 = 默认工作平面的法向，本机实测是 **Y 轴**，不是 Z 轴。
+      * ExtrudeFaces.Execute 只能用三参形式 (selection, 距离, 选项)；显式传第 5 个
+        参数会让脚本宿主直接中止整个脚本。
+      * 草图在切到 Solid 模式后会变成一张“面”，所以这个函数适合做单个圆；
+        多条平行草图的处理不可靠（实测两个圆最后只生成一个面）。
+    """
+    ensure_document()
+    SketchCircle.Create(Point2D.Create(MM(center2d[0]), MM(center2d[1])), MM(radius))
+    ViewHelper.SetViewMode(InteractionMode.Solid, None)
+    bodies = list(GetRootPart().Bodies)
+    if not bodies:
+        raise RuntimeError("extrude_circle(): 草图没有生成可拉伸的面")
+    faces = list(bodies[len(bodies) - 1].Faces)
+    if not faces:
+        raise RuntimeError("extrude_circle(): 草图体上没有面")
+    opts = ExtrudeFaceOptions()
+    opts.ExtrudeType = ExtrudeType.Cut if cut else ExtrudeType.Add
+    res = ExtrudeFaces.Execute(Selection.Create(faces[0]), MM(height), opts)
+    body = _created_body(res)
+    if name and not cut and body is not None:
+        try:
+            body.Name = name
+        except:
+            pass
+    return body
+
+
+# ---------------------------------------------------------------------------
+# 面的测量 / 查询（单位：mm、mm^2）
+# ---------------------------------------------------------------------------
+
+def _axis_index(axis):
+    a = str(axis).lower()
+    if a in ("x", "0"):
+        return 0
+    if a in ("y", "1"):
+        return 1
+    if a in ("z", "2"):
+        return 2
+    raise ValueError("axis 只能是 'x' / 'y' / 'z'，收到: " + str(axis))
+
+
+def _shape_of(obj):
+    """DesignFace / DesignEdge 是包装对象，几何实体在 .Shape 上。"""
+    try:
+        return obj.Shape
+    except:
+        return obj
+
+
+# PolylineOptions 不一定在宿主预加载的名字里，按 API 版本动态取一次。
+try:
+    PolylineOptions
+except NameError:
+    PolylineOptions = None
+    try:
+        import clr
+        import SpaceClaim
+        _api = getattr(SpaceClaim, 'Api')
+        _ver = globals().get('SCDM_API_VERSION', 'V22')
+        PolylineOptions = getattr(getattr(_api, _ver), 'Geometry').PolylineOptions
+    except:
+        PolylineOptions = None
+
+
+def _edge_points(edge):
+    """边上的采样点。
+
+    关键：闭合圆边的 StartPoint/EndPoint 返回的是**圆心**（退化），
+    只用它会让圆柱、圆管这类曲面的面心和包围盒全部失真，
+    所以优先用 GetPolyline 把边离散成多点。
+    """
+    if PolylineOptions is not None:
+        try:
+            pts = edge.GetPolyline(PolylineOptions())
+            if pts is not None and pts.Count > 0:
+                return list(pts)
+        except:
+            pass
+    try:
+        return [edge.StartPoint, edge.EndPoint]
+    except:
+        return []
+
+
+def face_center(face):
+    """面心坐标 (x, y, z)，单位 mm。
+
+    注意：脚本里的面是 DesignFace 包装对象，真实几何要通过 face.Shape 取。
+    直接用 face.Edges 会报 'DesignEdge' object has no attribute 'StartPoint'。
+    """
+    sx = sy = sz = 0.0
+    n = 0
+    for e in _shape_of(face).Edges:
+        for p in _edge_points(e):
+            sx += p.X
+            sy += p.Y
+            sz += p.Z
+            n += 1
+    if n == 0:
+        raise RuntimeError("cannot compute face centre: the face exposes no usable edge")
+    return (sx / n * 1000.0, sy / n * 1000.0, sz / n * 1000.0)
+
+
+def face_area(face):
+    """面积，单位 mm^2。"""
+    return _shape_of(face).Area * 1.0e6
+
+
+def body_extent(body, axis="z"):
+    """体在指定轴上的最小/最大坐标 (lo, hi)，单位 mm。"""
+    i = _axis_index(axis)
+    vals = []
+    for f in body.Faces:
+        for e in _shape_of(f).Edges:
+            for p in _edge_points(e):
+                vals.append((p.X, p.Y, p.Z)[i])
+    if not vals:
+        raise RuntimeError("cannot compute body extent: no edge points found")
+    return (min(vals) * 1000.0, max(vals) * 1000.0)
+
+
+def body_size(body):
+    """体的包围盒尺寸 (dx, dy, dz)，单位 mm。"""
+    lo = []
+    hi = []
+    for i in range(3):
+        a, b = body_extent(body, i)
+        lo.append(a)
+        hi.append(b)
+    return (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2])
+
+
+def faces_where(body, predicate):
+    """按条件挑面：predicate(center_mm, area_mm2, face) -> True/False。
+
+    例：faces_where(body, lambda c, a, f: a > 20)   挑面积大于 20 mm^2 的面
+    """
+    out = []
+    for f in body.Faces:
+        if predicate(face_center(f), face_area(f), f):
+            out.append(f)
+    return out
+
+
+def faces_at(body, axis="z", value=0.0, tol=1e-3):
+    """面心在指定轴坐标等于 value(mm) 的所有面（tol 单位 mm）。"""
+    i = _axis_index(axis)
+    return faces_where(body, lambda c, a, f: abs(c[i] - value) <= tol)
+
+
+def faces_between(body, axis="z", lo=None, hi=None, tol=1e-3):
+    """面心在指定轴坐标落在 [lo, hi] 区间内的面（单位 mm）。"""
+    i = _axis_index(axis)
+    def ok(c, a, f):
+        if lo is not None and c[i] < lo - tol:
+            return False
+        if hi is not None and c[i] > hi + tol:
+            return False
+        return True
+    return faces_where(body, ok)
+
+
+# ---------------------------------------------------------------------------
+# 命名选择（Named Selection）
+# ---------------------------------------------------------------------------
+
+def name_faces(name, face_list):
+    """把一组面做成命名选择并命名。
+
+    SpaceClaim 的 NamedSelection.Create 不接受名字，只能先建后改名；
+    默认名字是本地化的（中文界面下不是 ASCII），所以脚本里不要打印它。
+    """
+    face_list = list(face_list)
+    if not face_list:
+        raise ValueError("命名选择 '" + str(name) + "' 没有任何面")
+    res = NamedSelection.Create(Selection.Create(face_list),
+                                Selection.Empty(),
+                                PartLocation.Root,
+                                None)
+    if not res.Success:
+        raise RuntimeError("命名选择创建失败: " + str(name))
+    grp = res.CreatedNamedSelection
+    try:
+        grp.Name = name
+    except:
+        NamedSelection.Rename(grp.Name, name)
+    return grp
+
+
+def name_boundaries(body, bottom="inlet", top="outlet", sides="wall",
+                    axis="z", tol=None, split_sides=False):
+    """CFD 最常见的命名方式：沿 axis 方向，一端 bottom、另一端 top、其余为 sides。
+
+    返回 {"bottom": [...], "top": [...], "sides": [...]} 三个面列表。
+    传 None 可以跳过某一类；split_sides=True 会把侧面拆成 wall_1..wall_n。
+    全套脚本 / 圆柱管的进出口都适用。
+    """
+    lo, hi = body_extent(body, axis)
+    if tol is None:
+        tol = max(1e-3, (hi - lo) * 1e-6)
+    i = _axis_index(axis)
+
+    buckets = {"bottom": [], "top": [], "sides": []}
+    for f in body.Faces:
+        v = face_center(f)[i]
+        if abs(v - lo) <= tol:
+            buckets["bottom"].append(f)
+        elif abs(v - hi) <= tol:
+            buckets["top"].append(f)
+        else:
+            buckets["sides"].append(f)
+
+    if bottom and buckets["bottom"]:
+        name_faces(bottom, buckets["bottom"])
+    if top and buckets["top"]:
+        name_faces(top, buckets["top"])
+    if sides and buckets["sides"]:
+        if split_sides:
+            for k in range(len(buckets["sides"])):
+                name_faces("%s_%d" % (sides, k + 1), [buckets["sides"][k]])
+        else:
+            name_faces(sides, buckets["sides"])
+    return buckets
+
+
+# ---------------------------------------------------------------------------
+# 保存与输出
+# ---------------------------------------------------------------------------
+
+def save_model(path):
+    """另存为 .scdocx（已存在则先删掉，避免覆盖提示）。"""
+    try:
+        from System.IO import File
+        if File.Exists(path):
+            File.Delete(path)
+    except:
+        pass
+    DocumentSave.Execute(path)
+    return path
+
+
+def group_summary(part=None):
+    """当前文档所有命名选择的 [(名字, 成员数), ...]。"""
+    if part is None:
+        part = GetRootPart()
+    out = []
+    for g in NamedSelection.GetGroups():
+        out.append((str(g.Name), int(g.Members.Count)))
+    return out
+
+
+def _safe_print(text):
+    try:
+        print(text)
+    except:
+        try:
+            print(text.encode("ascii", "replace"))
+        except:
+            pass
+
+
+def finish(path, body=None):
+    """收尾：保存 -> 打成功哨兵 -> 打印自检摘要。
+
+    成功哨兵 <<<SCDM_OK>>> 是 Invoke-Scdm.ps1 判定成功的依据，
+    所以它必须在任何可能失败的操作之前打印。
+    """
+    save_model(path)
+    print("<<<SCDM_OK>>>")
+    print("saved: " + str(path))
+    try:
+        if body is not None:
+            dx, dy, dz = body_size(body)
+            _safe_print("[size] %.3f x %.3f x %.3f mm, %d face(s)"
+                        % (dx, dy, dz, len(list(body.Faces))))
+        for nm, cnt in group_summary():
+            _safe_print("[named selection] %s -> %d face(s)" % (nm, cnt))
+    except:
+        print("[warn] summary failed, artifact is still saved")
+    return path

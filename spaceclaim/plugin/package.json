@@ -1,0 +1,29 @@
+{
+  "name": "dsh-plugin-spaceclaim",
+  "version": "0.1.0",
+  "description": "Headless Ansys SpaceClaim modelling tools for the DeepSeek Harness: build geometry and name boundary zones from a Python model script, with independent verification.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js"
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis-plugin",
+    "spaceclaim",
+    "ansys",
+    "cfd",
+    "cad"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  }
+}

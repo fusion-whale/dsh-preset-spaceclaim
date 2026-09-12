@@ -1,0 +1,11 @@
+# 运行产物与依赖（不入库）
+node_modules/
+_smoke_run/
+*.scdocx
+*.log
+__pycache__/
+*.pyc
+
+# 编辑器
+.vscode/
+.idea/
