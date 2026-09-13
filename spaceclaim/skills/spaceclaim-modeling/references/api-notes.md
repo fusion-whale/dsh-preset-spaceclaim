@@ -1085,6 +1085,73 @@ IComponent.GetAllBodies() / GetBodies() / GetInstance() / GetInstanceName() / Ge
 | `Baffle`（30×20 面 normal=y，加厚 1） | 6 面、包围盒 30×**1**×20 |
 | 装配 | 1 体进组件 → 根零件 7→6、组件 1 体；搬回 → 根零件 7；explode → 3 个组件；展平 → 根零件 7 |
 
+## 24. 布尔 / 补面 / 两个新踩的坑（第 19 轮补测）
+
+### 24.1 实体之间的布尔：`Combine` 只有"并"，没有"差"
+
+```
+Combine.Merge(ISelection targetSelection, ISelection toolSelection, ICommandInfo info) -> CombineResult
+Combine.Merge(ISelection targetSelection, ICommandInfo info)
+Combine.Intersect(ISelection target, ISelection tool, MakeSolidsOptions options, ICommandInfo info)
+Combine.RemoveRegions(ISelection selection, ICommandInfo info)
+MergeBodies.Execute(ISelection targetSel, MergeBodiesOptions options, ICommandInfo info)
+```
+
+实测（40×40×40 的域 + r=6、h=60 的圆柱，两者都声明 `separate=True` 保持独立）：
+
+| 调用 | 结果 |
+|---|---|
+| `Combine.Merge(domain, tool)` | `Success=True`，合成 **1 个体**：40×40×**60**、10 个面 —— 是**并集**，圆柱凸出来那截也留着 |
+| `Combine.Merge(Selection.Create([domain, tool]), None)` | 同上，完全一样 |
+| `Combine.Merge(domain, 加厚出来的薄板)` | **失败**：中文 StandardError。曲面 + `thicken` 造出来的板不能这么并 |
+| `MergeBodies.Execute([两个分开的体])` | **失败**：中文 StandardError（顺带把两个体的名字改成了默认名） |
+
+两个重要推论：
+
+1. **没有"把已有体 A 从已有体 B 上减掉"的脚本入口。** 要挖料只能在**建料的时候**挖：
+   `box(..., cut=True)` / `cylinder(..., cut=True)`（已验证可靠），或者在脚本里先算出位置、
+   再逐个 `cut=True`。
+2. **贴着的体在建的时候就已经自动并成一个了**（实测：把第二个 10³ 放在第一个的 +X 面上，
+   建完直接就是 1 个体 20×10×10、6 个面），所以 `MergeBodies` 基本用不上。
+
+### 24.2 `Fill` 补面：这组参数下没效果
+
+```
+Fill.Execute(ISelection selection, ISelection secondarySelection, FillOptions options,
+             FillMode mode, ICommandInfo info)
+FillMode : Sketch / Section / Layout / ThreeD
+FillOptions : AutoExtendFillArea / PatchBlend / ZipLaminarEdges / GapAngle / GapDistance /
+              UntrimSingleFace / AllowMultiFacePatch
+```
+
+对"一块 40×40×10 的板、中间穿了一个 r=5 的洞"的顶面调
+`Fill.Execute(topFace, Selection.Empty(), opts, FillMode.ThreeD, None)`：**返回 `Success=True`，
+但几何毫无变化**（前后都是 7 个面、4957.08 mm²）。补面这条路在这个版本没打通。
+
+### 24.3 坑一：`cut=True` 挖出来的墙面，外法向是"背离实体"的那一侧
+
+这是本轮最值钱的一条。用 `box(..., cut=True)` 在 x 30..32 挖掉一块板之后：
+
+| 位置 | 外法向 |
+|---|---|
+| 空腔的 x=30 那侧（实体在 x<30） | **+X** |
+| 空腔的 x=32 那侧（实体在 x>32） | **−X** |
+| 针翅腔的顶面 z=20（实体在上方） | **−Z** |
+
+也就是说**不能按"坐标小的一侧还是大的一侧"来猜法向**，要看实体在哪边。写反的后果很隐蔽：
+那条规则一张面都匹配不到（面数为 0，不报错、也不建分区），然后**后面的规则会把它们吃掉** ——
+实测 `tube_bank_demo` 第一版 `inlet` 匹配到 3 张面、合计 3042.83 mm² =
+1396.81（真进口）+ 823.01 + 823.01（两块折流板），单看 `inlet` 的面积根本看不出错。
+
+**所以每个命名选择都要把"面数 + 面积合计"打出来和手算对**，这是唯一可靠的发现方式。
+
+### 24.4 坑二：给某个名字的规则卡得太松
+
+同一个例子里，`{"kind":"plane","at":("x",30.0)}` 本意是抓折流板面，结果还抓到了
+**顶面被折流板切断后剩下的一半**（x 0..60、y=50、面积 2400）—— 它的包围盒中心 x 也是 30。
+加上 `normal` + `sign` 约束之后就准了。规则里能用几个条件就用几个。
+
+
 
 
 

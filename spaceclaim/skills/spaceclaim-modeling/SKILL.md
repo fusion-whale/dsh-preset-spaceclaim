@@ -383,6 +383,27 @@ assembly_summary()                           # [('(root)', 7), ('Assembly1', 1),
 
 `verify_model.py` 现在**失败时会打 `<<<SCDM_VERIFY_FAILED>>>` 而不是 OK**，运行器据此报错。老版本无论如何都打 OK，于是 `group_summary()` 抛异常会被静默吞掉 —— 校验看着是绿的、实际上根本没读到命名选择。这个洞是 §1h 的空组件问题暴露出来的。
 
+## 1i. 现成的示例模型（examples/）
+
+`examples/` 里四个配方都是真跑过、`-Verify` 校验过的，数字可以拿来对照：
+
+```powershell
+$S = "<skill-dir>"
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\examples\tube_bank_demo.py"   -Out "$S\examples\tube_bank_demo.scdocx"   -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\examples\pin_fin_demo.py"     -Out "$S\examples\pin_fin_demo.scdocx"     -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\examples\surface_asm_demo.py" -Out "$S\examples\surface_asm_demo.scdocx" -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\examples\bend90_demo.py"      -Out "$S\examples\bend90_demo.scdocx"      -Verify
+```
+
+| 示例 | 是什么 | 实测 |
+|---|---|---|
+| `tube_bank_demo` | 管壳式换热器壳程：100×50×40 壳 + 12 根贯穿管 + 2 块弓形折流板 | 44 面（20 平面 + 24 圆柱）；进出口各 1396.81、折流板 4 面各 823.01、管壁 29405.31、壁面 14 面 17664.00 |
+| `pin_fin_demo` | 针翅散热器流道：120×40×30 流道 + 10×4 根 r2 高 20 的针翅 | 86 面（46 平面 + 40 圆柱）；进出口各 1200.00、顶面 4800.00、底面 4297.35、针翅侧面 10053.10、针翅顶面 502.65 |
+| `surface_asm_demo` | 曲面加厚（40×30 面 → 3mm 板）+ 装配组件搬进搬出 | 面 1 面 1200.00 → 加厚后 6 面 40×3×30 面积 2820.00；根零件 3 → 2 → 3 |
+| `bend90_demo` | 90° 弯管流域（真圆截面弯头 + 两段直管） | 1 体 7 面；inlet/outlet 各 78.54、bend_wall 1449.95、wall 4 面 |
+
+**挖料之后的面朝向是最容易错的一步**：用 `cut=True` 挖掉一块料，**x 小的那一侧那张墙面的外法向是 +X**（背离实体、指向空腔），不是 −X；挖出来的腔顶同理是 −Z。写反了那条规则一张都匹配不到，接着后面的规则会把它整批吃掉 —— 实测 `tube_bank_demo` 第一版 `inlet` 吃到了 3 张面、合计 3042.83 mm²，正好是"进出口 + 两块折流板"（1396.81 + 823.01 + 823.01）。**判断有没有吃错，最快的办法是把每个命名选择的面数 + 面积合计打出来和手算对。**
+
 ## 2. Run it
 
 ```powershell
