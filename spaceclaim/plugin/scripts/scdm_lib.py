@@ -161,6 +161,30 @@ def cylinder(radius, height, origin=(0.0, 0.0, 0.0), axis="z", name="Body",
     return body
 
 
+def sphere(radius, center=(0.0, 0.0, 0.0), name="Body", cut=False):
+    """球体。center 是球心，单位 mm。
+
+    cut=True 时用这个球做布尔减——可以在一块实体里挖出球腔/球缺
+    （实测：20x20x20 的方块挖掉 r=6 的球后是 1 个体、7 个面，
+    球面面积 452.39 mm² = 4*pi*6^2）。
+
+    实测：r=5、球心 (10,10,10) → 1 个体 1 个面（kind=sphere）、
+    面积 314.16 mm²、包围盒 10 x 10 x 10。
+    """
+    ensure_document()
+    c = Point.Create(MM(center[0]), MM(center[1]), MM(center[2]))
+    # 实测 ExtrudeType.Cut 对球无效（球会变成独立体、目标体没被挖），改用 ForceCut
+    et = ExtrudeType.ForceCut if cut else None
+    res = SphereBody.Create(c, MM(radius)) if et is None else SphereBody.Create(c, MM(radius), et)
+    body = _created_body(res)
+    if name and not cut and body is not None:
+        try:
+            body.Name = name
+        except:
+            pass
+    return body
+
+
 def move(body, dx=0.0, dy=0.0, dz=0.0):
     """把实体整体平移 (dx, dy, dz)，单位 mm。返回同一个体对象。
 
@@ -1406,6 +1430,19 @@ def group_summary(part=None):
     return out
 
 
+def _ascii(text):
+    """把名字转成纯 ASCII 字符串。
+
+    默认名是本地化的（中文界面下是中文），直接参与 `"%s" % name` 会在格式化阶段
+    就抛 UnicodeEncodeError —— 那一步发生在 _safe_print 的保护之外，会把整个脚本干掉。
+    """
+    try:
+        raw = text if isinstance(text, str) else str(text)
+        return raw.encode("ascii", "replace")
+    except:
+        return "<name>"
+
+
 def _safe_print(text):
     try:
         print(text)
@@ -1431,7 +1468,7 @@ def finish(path, body=None):
             _safe_print("[size] %.3f x %.3f x %.3f mm, %d face(s)"
                         % (dx, dy, dz, len(list(body.Faces))))
         for nm, cnt in group_summary():
-            _safe_print("[named selection] %s -> %d face(s)" % (nm, cnt))
+            _safe_print("[named selection] %s -> %d face(s)" % (_ascii(nm), cnt))
     except:
         print("[warn] summary failed, artifact is still saved")
     return path

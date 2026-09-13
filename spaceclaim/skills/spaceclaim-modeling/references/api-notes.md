@@ -563,3 +563,44 @@ Sweep.Execute(轮廓选择, 路径选择, SweepCommandOptions(), ICommandInfo)
 所以想让路径弧落在 XZ 平面里，点必须写成 `(u, 0, v)`；写成 `(u, v, 0)` 就会跑到 XY 平面去
 （本轮的坑就在这：中点写成 (20,10,0) 导致整条弧偏出轮廓平面）。
 
+补充（第 12 轮）：`SweepCommandOptions` 的成员只有
+`SweepNormalTrajectory` / `ExtrudeType` / `KeepMirror` / `KeepLayoutSurfaces` /
+`KeepCompositeFaceRelationships` / `Select`；`SweepCommandResult` **只有 `Success` 和
+`IsActiveDoc`**（没有 `CreatedBodies`）。把 `SweepNormalTrajectory` 分别设 False / True
+重试上面第 3 种（几何上正确的）配置：**两种都返回 `Success=False` 且毫无几何变化**。
+也就是说这个返回值两种情况都不可信，只能靠体数/面数变化判成败。
+
+## 16. 球体与布尔减的差异（第 12 个回归用例实测）
+
+```
+SphereBody.Create(Point center, Double radius)                      # 无 ExtrudeType
+SphereBody.Create(Point center, Double radius, ExtrudeType, ICommandInfo)
+SphereBody.Create(Point center, Point onSphere, ExtrudeType, ICommandInfo)
+```
+
+**球体本身**：`SphereBody.Create(中心, r)` 可用。实测 r=5、球心 (10,10,10) →
+1 个体、1 个面（`face_kind` = `sphere`）、面积 **314.16 mm² = 4πr²**、包围盒 10×10×10。
+
+**关键差异：球做布尔减必须用 `ForceCut`。**
+
+| ExtrudeType | 结果 |
+|---|---|
+| `Cut` | **没挖掉**：球变成第三个独立体，目标方块仍是 6 个面 |
+| `ForceCut` | ✅ 挖出来了：20³ 方块变成 **7 个面**（6 平面 + 1 球面），球面面积 **452.39 mm² = 4πr²**、面心正是球心 |
+
+注意 `box` / `cylinder` 的 `cut=True`（用 `ExtrudeType.Cut`）是**验证过可用**的
+（第 4 个用例：板上挖通孔 → 7 个面），所以不是"Cut 一律无效"，而是**球体这个命令对 Cut 不敏感**。
+`scdm_lib.sphere(cut=True)` 内部已经固定用 `ForceCut`。
+
+顺带：球面可以用 `{"kind": "sphere"}` 规则精确选中（`faces_by_kind` 直接读几何类型名）。
+
+### 16.1 又一个名字编码的坑
+
+没有命名的体保留的是**本地化默认名**（中文界面下是中文）。`"%s" % body.Name`
+在**格式化阶段**就抛 `UnicodeEncodeError` —— 这一步发生在 `_safe_print` 的保护之前，
+所以会把整个脚本干掉（第 12 轮校验脚本就是这么崩的，报错甚至出现在
+`--- verify` 段落里，看起来像校验逻辑出错）。
+
+修法：`scdm_lib._ascii(name)` 先转 ASCII 再格式化；`verify_model.py` 的体名打印已经用它。
+自己写脚本时，任何 `print` 里出现 `body.Name` / 组名都要先过一遍 `_ascii`。
+

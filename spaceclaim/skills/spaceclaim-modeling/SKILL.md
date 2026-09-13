@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -192,6 +192,8 @@ The runner composes the script, runs the verified command line, and judges succe
 | Face measurement | `Face.GetBoundingBox(Matrix.CreateScale(1.0))` returns an **analytic** face box (`Center` / `MinCorner` / `MaxCorner`). The old edge-sampling method could not see extremes that are isolated vertices — a cone's apex lies on no edge and the cone surface has no seam edge — so it measured a cone's axial extent as **0** and broke `name_boundaries` on cones. Do **not** call `GetExtremePoint(d, d, d)`: three identical directions raise `ValueError`. |
 | Overlap | A new body overlapping an existing one is **unioned** into it by default; `ExtrudeType.ForceIndependent` (`separate=True`) prevents that. |
 | Sweep / elbow | **Not usable yet — do not retry from scratch.** `Sweep.Execute(profile, path, SweepCommandOptions())` reports `Success=True` in cases where it produces **no geometry at all** (verified: a polyline path and an in-plane arc path both silently no-op'd). One out-of-plane arc did produce a 3-face solid whose size did not match a hand calculation. Judge a sweep by the body/face count, never by `Success`. Pick up from `references/api-notes.md` §15. |
+| Sphere / boolean cut | `SphereBody.Create(center, radius)` works: r=5 gives 1 body, 1 face of kind `sphere`, area 314.16 mm², bbox 10³. But **`ExtrudeType.Cut` does not cut for a sphere** — the sphere becomes a separate body and the target keeps its 6 faces. `ExtrudeType.ForceCut` does work (verified: a 20³ box gains a 7th face, the spherical cavity, area 452.39 mm² = 4πr²). `box`/`cylinder` cuts are verified fine with plain `Cut`. |
+| Body names | An unnamed body keeps a **localised** default name (Chinese here). `"%s" % body.Name` raises `UnicodeEncodeError` during formatting — *outside* `_safe_print`'s protection — and kills the script. Use `_ascii(name)` (in the library) before formatting; `verify_model.py` does this for body names. |
 | Units | `MM(x)` converts mm to internal metres. `Point.Create` takes metres — never pass raw mm. |
 | Saving | `DocumentSave.Execute(path)`; delete an existing file first to avoid overwrite prompts. |
 
@@ -221,9 +223,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_polygon.py"        -Out "$S\tests\selftest_polygon.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_profile.py"        -Out "$S\tests\selftest_profile.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_revolve.py"        -Out "$S\tests\selftest_revolve.scdocx"        -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_sphere.py"         -Out "$S\tests\selftest_sphere.scdocx"         -Verify
 ```
 
-All eleven must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All twelve must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -238,6 +241,7 @@ All eleven must end in `[scdm] status=ok` and print the verify block. Regression
 | `selftest_polygon` | 3 bodies: `HexDuct 10.000 x 8.660 x 20.000` (8 faces) · `OctDuct 15.000 x 12.000 x 12.000` (10 faces) · `Extra 10x10x10` | hex_inlet/hex_outlet 各 64.95 mm² @ (0,0,0)/(0,0,20) · hex_wall 6 faces × 100.00 mm² · oct_inlet/oct_outlet 各 101.82 mm² @ (40,0,0)/(55,0,0) · oct_wall 8 faces × 68.88 mm² |
 | `selftest_profile` | 2 bodies: `TrapDuct 20.000 x 10.000 x 20.000` (6 faces) · `EllipDuct 15.000 x 20.000 x 10.000` (3 faces) | trap_inlet/trap_outlet 各 150.00 mm² @ (0,0,0)/(0,0,20) · trap_wall 4 faces (400.00 / 200.00 / 223.61 ×2) · ell_inlet/ell_outlet 各 157.08 mm² @ (40,0,0)/(55,0,0) · ell_wall 726.63 mm² |
 | `selftest_revolve` | 2 bodies: `Frustum 16.000 x 16.000 x 20.000` (3 faces) · `Cone 20.000 x 16.000 x 16.000` (2 faces) | fru_inlet 201.06 mm² @ (0,0,0) · fru_outlet 50.27 mm² @ (0,0,20) · fru_wall 768.91 mm² @ (0,0,10) · cone_inlet 201.06 mm² @ (40,0,0) · cone_wall 541.38 mm² @ (50,0,0) |
+| `selftest_sphere` | 2 bodies: `Ball 10x10x10` (1 face) · `Cavity 20x20x20` (7 faces = 6 planes + spherical cavity) | ball_surface 314.16 mm² @ (0,0,0) · cavity_wall 452.39 mm² @ (60,0,0) |
 
 Run these before blaming a new model script.
 

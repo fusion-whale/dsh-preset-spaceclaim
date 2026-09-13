@@ -19,7 +19,7 @@ try:
     for bi in range(part.Bodies.Count):
         body = part.Bodies[bi]
         _safe_print("[verify] body[%d] name=%s faces=%d"
-                    % (bi, str(body.Name), len(list(body.Faces))))
+                    % (bi, _ascii(body.Name), len(list(body.Faces))))
         dx, dy, dz = body_size(body)
         print("[verify] body[%d] size = %.3f x %.3f x %.3f mm" % (bi, dx, dy, dz))
 
