@@ -497,6 +497,164 @@ def profile_prisms(profiles):
     return out
 
 
+def revolve_profile(points, angle_deg=360.0, origin=(0.0, 0.0, 0.0), name="Body"):
+    """单个回转体（revolve_profiles 的包装）。轮廓必须整体在 u >= 0 一侧。"""
+    return revolve_profiles([{
+        "points": points, "angle_deg": angle_deg, "origin": origin, "name": name,
+    }])[0]
+
+
+def revolve_profiles(profiles):
+    """一次建多个回转体（绕各自的轴旋转）。
+
+    profiles 里每个元素是 dict：
+        points      [(u, v), ...] 闭合轮廓；u 是**到旋转轴的距离（>= 0）**，v 是轴向坐标
+        angle_deg   旋转角度（度），默认 360（整圈）。底层用弧度，内部换算
+        axis        "x"/"y"/"z"（回转体最终的轴向；默认 "z"）
+        origin      摆正后的位置（沿轴向对齐 bbox 最小端，另两轴按中心对齐）
+        name        体名
+
+    为什么要批量：**文档里一旦有实体，再新建草图就会让 SpaceClaim 崩**（实测空引用），
+    所以所有轮廓必须在任何实体之前一次画完。第 i 个轮廓沿 X 偏移 i*spacing，
+    因此绕它自己那条中轴旋转，而不是绕世界 Z 轴。
+
+    实测：矩形轮廓 (0,0)(5,0)(5,10)(0,10) 整圈 → 圆柱，3 个面，
+    端面 78.54 mm² = pi*5^2、柱面 314.16 mm² = 2*pi*5*10。
+
+    注意角度单位：底层 `RevolveFaces.Execute(面, Line, 角度, 选项)` 用的是**弧度**
+    （传 2*pi 得到整圈；传 360 也得到整圈，因为 360 rad 已超过一圈）。
+    """
+    import math
+    ensure_document()
+    existing = GetRootPart().Bodies.Count
+    if existing:
+        raise RuntimeError(
+            "revolve_profiles: the document already has %d body/bodies. Sketch-based profiles "
+            "must be created before any solid exists (SpaceClaim 2022 R1 crashes on a new "
+            "sketch once a solid is present). Build the revolved bodies first, then add "
+            "box/cylinder/tube bodies." % existing)
+    if not profiles:
+        return []
+
+    norm = []
+    for p in profiles:
+        pts = list(p.get("points") or [])
+        if len(pts) < 3:
+            raise ValueError("revolve_profiles: every profile needs at least 3 points")
+        for (u, v) in pts:
+            if u < 0:
+                raise ValueError("revolve_profiles: every u (distance from the axis) must be >= 0")
+        norm.append(pts)
+
+    widest = 1.0
+    for pts in norm:
+        w = max(u for (u, v) in pts)
+        if w > widest:
+            widest = w
+    spacing = widest * 3.0
+
+    # 1) 先把所有轮廓画完（互不重叠）
+    offsets = []
+    for i in range(len(norm)):
+        off = i * spacing
+        offsets.append(off)
+        lst = List[Point]()
+        for (u, v) in norm[i]:
+            lst.Add(Point.Create(MM(off + u), MM(0), MM(v)))
+        first = norm[i][0]
+        lst.Add(Point.Create(MM(off + first[0]), MM(0), MM(first[1])))
+        SketchLine.CreatePolyLine(lst, False, False)
+
+    ViewHelper.SetViewMode(InteractionMode.Solid, None)
+    sketch_body = _sketch_region_body({})
+    if sketch_body is None:
+        raise RuntimeError("revolve_profiles: the profiles did not produce a region body")
+
+    # 2) 逐个绕自己的中轴旋转
+    out = []
+    for i in range(len(profiles)):
+        p = profiles[i]
+        target = None
+        best = None
+        for f in list(sketch_body.Faces):
+            d = abs(face_center(f)[0] - offsets[i])
+            if best is None or d < best:
+                best = d
+                target = f
+        if target is None:
+            raise RuntimeError("revolve_profiles: no profile face left for profile %d" % i)
+        before = {}
+        for b in GetRootPart().Bodies:
+            before[_body_key(b)] = 1
+        axis_line = Line.Create(Point.Create(MM(offsets[i]), MM(0), MM(0)),
+                                Direction.Create(0, 0, 1))
+        RevolveFaces.Execute(Selection.Create(target), axis_line,
+                             math.radians(float(p.get("angle_deg", 360.0))),
+                             RevolveFaceOptions())
+        body = _sketch_region_body(before)
+        if body is None:
+            raise RuntimeError("revolve_profiles: revolve produced no body for profile %d" % i)
+        a = str(p.get("axis", "z")).lower()
+        if a == "x":
+            rotate(body, 90.0, axis="y")
+        elif a == "y":
+            rotate(body, -90.0, axis="x")
+        elif a != "z":
+            raise ValueError("revolve_profiles: axis must be 'x'/'y'/'z'")
+        _anchor_prism(body, a, tuple(p.get("origin", (0.0, 0.0, 0.0))))
+        nm = p.get("name")
+        if nm:
+            try:
+                body.Name = nm
+            except:
+                pass
+        out.append(body)
+    return out
+
+
+def cone_frustum(radius1, radius2, height, origin=(0.0, 0.0, 0.0), axis="z", name="Cone"):
+    """**真正的**圆锥台/圆柱台（回转体，不是阶梯近似）。单个版本。
+
+    radius1 在起点端、radius2 在终点端；其中一端为 0 就是圆锥。
+    多个锥台请用 cone_frustums()，不要连续调本函数（草图限制）。
+    """
+    return cone_frustums([{
+        "radius1": radius1, "radius2": radius2, "height": height,
+        "origin": origin, "axis": axis, "name": name,
+    }])[0]
+
+
+def cone_frustums(truncated_cones):
+    """一次建多个锥台/圆锥（回转体批量形式）。
+
+    每个元素：radius1 / radius2 / height / origin / axis / name。
+    实测：r1=8, r2=4, h=20 → 16x16x20，3 个面，底 201.06、顶 50.27、侧面 768.94。
+    """
+    profiles = []
+    for t in truncated_cones:
+        r1 = float(t.get("radius1", 0.0))
+        r2 = float(t.get("radius2", 0.0))
+        h = float(t.get("height", 1.0))
+        if r1 < 0 or r2 < 0:
+            raise ValueError("cone_frustums: radii must be >= 0")
+        if r1 == 0 and r2 == 0:
+            raise ValueError("cone_frustums: at least one radius must be > 0")
+        # 圆锥（一端半径为 0）只能给 3 个点，否则末两点重合会让轮廓退化
+        if r2 == 0:
+            pts = [(0.0, 0.0), (r1, 0.0), (0.0, h)]
+        elif r1 == 0:
+            pts = [(0.0, 0.0), (0.0, h), (r2, h)]
+        else:
+            pts = [(0.0, 0.0), (r1, 0.0), (r2, h), (0.0, h)]
+        profiles.append({
+            "points": pts, "angle_deg": 360.0,
+            "axis": t.get("axis", "z"),
+            "origin": t.get("origin", (0.0, 0.0, 0.0)),
+            "name": t.get("name", "Cone"),
+        })
+    return revolve_profiles(profiles)
+
+
 def extrude_circle(radius, height, center2d=(0.0, 0.0), name="Body", cut=False):
     """用“草图圆 -> 拉伸”造一个实体圆（走 草图 -> Solid 模式 -> ExtrudeFaces）。
 
@@ -572,50 +730,60 @@ def _edge_points(edge):
     只用它会让圆柱、圆管这类曲面的面心和包围盒全部失真，
     所以优先用 GetPolyline 把边离散成多点。
     """
+    pts = []
     if PolylineOptions is not None:
         try:
-            pts = edge.GetPolyline(PolylineOptions())
-            if pts is not None and pts.Count > 0:
-                return list(pts)
+            sampled = edge.GetPolyline(PolylineOptions())
+            if sampled is not None and sampled.Count > 0:
+                pts = list(sampled)
         except:
             pass
+    if not pts:
+        try:
+            pts = [edge.StartPoint, edge.EndPoint]
+        except:
+            pts = []
+    # 端点/顶点也要算进去：圆锥的顶点是孤立顶点，不在任何边的采样点上，
+    # 只靠采样点会把圆锥的轴向范围算成 0（实测踩过）。
     try:
-        return [edge.StartPoint, edge.EndPoint]
+        for v in (edge.StartVertex, edge.EndVertex):
+            if v is not None:
+                pts.append(v.Position)
     except:
-        return []
+        pass
+    return pts
+
+
+def _face_box(face):
+    """面的解析包围盒，返回 (center, min, max)，单位 mm。
+
+    用 `Face.GetBoundingBox(Matrix.CreateScale(1.0))`——实测这是唯一能覆盖
+    "极值只是一个孤立顶点"的面的办法（圆锥顶点不在任何边的采样点上，
+    而且圆锥面没有缝边）；旧的边采样法会把圆锥的轴向范围测成 0。
+    """
+    box = _shape_of(face).GetBoundingBox(Matrix.CreateScale(1.0))
+    c = box.Center
+    mn = box.MinCorner
+    mx = box.MaxCorner
+    return ((c.X * 1000.0, c.Y * 1000.0, c.Z * 1000.0),
+            (mn.X * 1000.0, mn.Y * 1000.0, mn.Z * 1000.0),
+            (mx.X * 1000.0, mx.Y * 1000.0, mx.Z * 1000.0))
+
+
+def face_center(face):
+    """面的中心 = **解析包围盒中心**，单位 mm。
+
+    用包围盒中心而不是边采样点的平均值：切面后会多出共线顶点，平均值会被拉偏
+    （实测 100x40x40 的体在底面 x=50 切开后，y=0 侧面的平均点 z 从 20 变成 16），
+    而且圆锥这类"极值只是顶点"的面根本采不到。
+    """
+    return _face_box(face)[0]
 
 
 def face_extent(face):
     """面的包围盒 ([minx,miny,minz], [maxx,maxy,maxz])，单位 mm。"""
-    lo = [None, None, None]
-    hi = [None, None, None]
-    for e in _shape_of(face).Edges:
-        for p in _edge_points(e):
-            vals = (p.X, p.Y, p.Z)
-            for i in range(3):
-                v = vals[i]
-                if lo[i] is None or v < lo[i]:
-                    lo[i] = v
-                if hi[i] is None or v > hi[i]:
-                    hi[i] = v
-    if lo[0] is None:
-        raise RuntimeError("cannot compute face extent: the face exposes no usable edge")
-    return ([lo[0] * 1000.0, lo[1] * 1000.0, lo[2] * 1000.0],
-            [hi[0] * 1000.0, hi[1] * 1000.0, hi[2] * 1000.0])
-
-
-def face_center(face):
-    """面的中心 = **包围盒中心**，单位 mm。
-
-    为什么不用边界采样点的平均值：面被切分之后会多出共线顶点，平均值会被拉偏。
-    实测：100x40x40 的体在底面 x=50 处切开后，y=0 那张侧面的"平均点"z 从 20 变成 16，
-    而包围盒中心仍然是 20。规则表按面心定位，所以这一点必须稳。
-
-    注意：脚本里的面是 DesignFace 包装对象，真实几何要通过 face.Shape 取。
-    直接用 face.Edges 会报 'DesignEdge' object has no attribute 'StartPoint'。
-    """
-    lo, hi = face_extent(face)
-    return ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0)
+    _c, mn, mx = _face_box(face)
+    return (list(mn), list(mx))
 
 
 def face_area(face):
@@ -624,16 +792,22 @@ def face_area(face):
 
 
 def body_extent(body, axis="z"):
-    """体在指定轴上的最小/最大坐标 (lo, hi)，单位 mm。"""
+    """体在指定轴上的最小/最大坐标 (lo, hi)，单位 mm。
+
+    取所有面解析包围盒的并集——比逐条边采样准确，也不会漏掉圆锥顶点那样的孤立极值点。
+    """
     i = _axis_index(axis)
-    vals = []
+    lo = None
+    hi = None
     for f in body.Faces:
-        for e in _shape_of(f).Edges:
-            for p in _edge_points(e):
-                vals.append((p.X, p.Y, p.Z)[i])
-    if not vals:
-        raise RuntimeError("cannot compute body extent: no edge points found")
-    return (min(vals) * 1000.0, max(vals) * 1000.0)
+        _c, mn, mx = _face_box(f)
+        if lo is None or mn[i] < lo:
+            lo = mn[i]
+        if hi is None or mx[i] > hi:
+            hi = mx[i]
+    if lo is None:
+        raise RuntimeError("cannot compute body extent: the body exposes no face")
+    return (lo, hi)
 
 
 def body_size(body):

@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `stepped_cone`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -188,7 +188,8 @@ The runner composes the script, runs the verified command line, and judges succe
 | Rule selection semantics | `match_faces` decides **whole faces by their centre** — it cannot cut a face into pieces. A single big bottom face either matches `between` entirely or not at all; splitting a face needs `SplitFace`, which is not wrapped. |
 | Extrude call form | `ExtrudeFaces.Execute(selection, MM(distance), options)` — the recorded 3-arg form. **Passing an explicit `ICommandInfo` (even `None`) as the 5th argument makes the host abort the whole script with no traceback.** Same for omitting vs. filling optional parameters in general: branch to a shorter overload instead of passing `None`. |
 | Sketch facts | `SketchCircle.Create(Point2D, radius)` + `ViewHelper.SetViewMode(InteractionMode.Solid, None)` turns the closed profile into a surface body with one face — that face is what you extrude. The overload taking an explicit `Plane` does **not** produce such a face (0 bodies). The extrusion axis is the default work plane's normal: **Y** on this machine. A fresh document has **no datum planes** (`DatumPlanes.Count == 0`), so `SketchPlane.ActivateDatum` has nothing to activate. |
-| Cone / frustum | **Not reachable from the script API here.** `Loft.Create(sel1, sel2, LoftOptions(), None)` rejects every construction tried: raw `DesignCurve` selections, `.ConvertToCurves()` selections, and disc faces all fail with *"The Loft command must include Bodies, Faces, Edges, Curves, or Points selection"*; the sketch curves returned by `SketchCircleResult.CreatedCurve` are invalidated by the Solid-mode switch. `Geometry.Profile` has no public factory (it is sheet-metal only), so `ExtrudeProfile` is unusable too. Use `stepped_cone` or build the cone in the GUI. |
+| Cone / frustum | **Reachable via revolve** — this supersedes the earlier "impossible" conclusion. `RevolveFaces.Execute(faceSel, Line.Create(point, dir), radians, RevolveFaceOptions())` turns a closed profile into a solid of revolution: a trapezoid gives a **true** frustum, a triangle a **true** cone. Use `cone_frustum()` / `cone_frustums()`. `Loft` and `ExtrudeProfile` remain unusable (see `references/api-notes.md` §7.3, §14). |
+| Face measurement | `Face.GetBoundingBox(Matrix.CreateScale(1.0))` returns an **analytic** face box (`Center` / `MinCorner` / `MaxCorner`). The old edge-sampling method could not see extremes that are isolated vertices — a cone's apex lies on no edge and the cone surface has no seam edge — so it measured a cone's axial extent as **0** and broke `name_boundaries` on cones. Do **not** call `GetExtremePoint(d, d, d)`: three identical directions raise `ValueError`. |
 | Overlap | A new body overlapping an existing one is **unioned** into it by default; `ExtrudeType.ForceIndependent` (`separate=True`) prevents that. |
 | Units | `MM(x)` converts mm to internal metres. `Point.Create` takes metres — never pass raw mm. |
 | Saving | `DocumentSave.Execute(path)`; delete an existing file first to avoid overwrite prompts. |
@@ -218,9 +219,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_pairs.py"          -Out "$S\tests\selftest_pairs.scdocx"          -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_polygon.py"        -Out "$S\tests\selftest_polygon.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_profile.py"        -Out "$S\tests\selftest_profile.scdocx"        -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_revolve.py"        -Out "$S\tests\selftest_revolve.scdocx"        -Verify
 ```
 
-All ten must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All eleven must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -234,6 +236,7 @@ All ten must end in `[scdm] status=ok` and print the verify block. Regression ba
 | `selftest_pairs` | 4 bodies: `Solid 50x40x40` · `Fluid 50x40x40` · `Bar 50x40x40` · `Bar1 50x40x40` (Bar split at x=50) | interface_a/interface_b 各 1600.00 mm² @ (50,20,20) · baffle_a/baffle_b 各 1600.00 mm² @ (50,120,20) |
 | `selftest_polygon` | 3 bodies: `HexDuct 10.000 x 8.660 x 20.000` (8 faces) · `OctDuct 15.000 x 12.000 x 12.000` (10 faces) · `Extra 10x10x10` | hex_inlet/hex_outlet 各 64.95 mm² @ (0,0,0)/(0,0,20) · hex_wall 6 faces × 100.00 mm² · oct_inlet/oct_outlet 各 101.82 mm² @ (40,0,0)/(55,0,0) · oct_wall 8 faces × 68.88 mm² |
 | `selftest_profile` | 2 bodies: `TrapDuct 20.000 x 10.000 x 20.000` (6 faces) · `EllipDuct 15.000 x 20.000 x 10.000` (3 faces) | trap_inlet/trap_outlet 各 150.00 mm² @ (0,0,0)/(0,0,20) · trap_wall 4 faces (400.00 / 200.00 / 223.61 ×2) · ell_inlet/ell_outlet 各 157.08 mm² @ (40,0,0)/(55,0,0) · ell_wall 726.63 mm² |
+| `selftest_revolve` | 2 bodies: `Frustum 16.000 x 16.000 x 20.000` (3 faces) · `Cone 20.000 x 16.000 x 16.000` (2 faces) | fru_inlet 201.06 mm² @ (0,0,0) · fru_outlet 50.27 mm² @ (0,0,20) · fru_wall 768.91 mm² @ (0,0,10) · cone_inlet 201.06 mm² @ (40,0,0) · cone_wall 541.38 mm² @ (50,0,0) |
 
 Run these before blaming a new model script.
 
