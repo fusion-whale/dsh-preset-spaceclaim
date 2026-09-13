@@ -226,9 +226,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_revolve.py"        -Out "$S\tests\selftest_revolve.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_sphere.py"         -Out "$S\tests\selftest_sphere.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_imprint.py"        -Out "$S\tests\selftest_imprint.scdocx"        -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_external_flow.py" -Out "$S\tests\selftest_external_flow.scdocx" -Verify
 ```
 
-All thirteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All fourteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -245,6 +246,7 @@ All thirteen must end in `[scdm] status=ok` and print the verify block. Regressi
 | `selftest_revolve` | 2 bodies: `Frustum 16.000 x 16.000 x 20.000` (3 faces) · `Cone 20.000 x 16.000 x 16.000` (2 faces) | fru_inlet 201.06 mm² @ (0,0,0) · fru_outlet 50.27 mm² @ (0,0,20) · fru_wall 768.91 mm² @ (0,0,10) · cone_inlet 201.06 mm² @ (40,0,0) · cone_wall 541.38 mm² @ (50,0,0) |
 | `selftest_sphere` | 2 bodies: `Ball 10x10x10` (1 face) · `Cavity 20x20x20` (7 faces = 6 planes + spherical cavity) | ball_surface 314.16 mm² @ (0,0,0) · cavity_wall 452.39 mm² @ (60,0,0) |
 | `selftest_imprint` | 2 bodies: `Plate 40x40x10` (7 faces after the split) · `Cutter 10x10x40` | patch 78.54 mm² @ (20,20,0) loops=1 · rest 1521.46 mm² @ (20,20,0) loops=2 |
+| `selftest_external_flow` | 1 body: `Domain 60x40x40` (7 faces) — the cylinder obstacle was absorbed as a void | inlet/outlet 1600 mm² @ (0,20,20)/(60,20,20) · obstacle 1256.64 mm² @ (30,20,20) · top/bottom_wall 2321.46 mm² @ z=40/z=0 · side_wall 2 faces × 2400 mm² |
 
 Run these before blaming a new model script.
 

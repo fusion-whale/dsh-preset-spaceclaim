@@ -638,3 +638,38 @@ SplitFace.ByCutter(目标面选择, 刀具体选择, SplitFaceOptions(), IComman
 `SplitBody.ByCutter(体, 体)` 试过两种参数个数都抛 `ValueError`，没继续深挖——需要切体时
 用已验证的 `split_body_by_plane()`。
 
+## 18. 外流场配方（第 14 个回归用例，一次跑通）
+
+绕圆柱的外流场流体域，**只有 4 行**：
+
+```python
+domain = box(60.0, 40.0, 40.0, origin=(0, 0, 0), name="Domain")     # 1) 先建外框
+cylinder(5.0, 60.0, origin=(30, 20, -10), axis="z", cut=True)       # 2) 再布尔减掉障碍物
+name_faces_by_rules(domain, [                                       # 3) 一次命名全部边界
+    ("inlet",  {"normal": "x", "sign": -1}), ("outlet", {"normal": "x", "sign": 1}),
+    ("obstacle", {"kind": "cylinder"}),
+    ("top_wall", {"normal": "z", "sign": 1}), ("bottom_wall", {"normal": "z", "sign": -1}),
+    ("side_wall", {"rest": True}),
+])
+```
+
+关键点：
+
+- **顺序是先外框、后障碍物**。`cut=True` 是"把这个体的体积从已有实体上减掉"，所以障碍物必须
+  在流体域之后创建。减完之后文档里**只剩流体域一个体**，障碍物壁面就是那个圆柱面。
+- `{"kind": "cylinder"}` 精确抓到障碍物壁面（读几何类型名，不依赖位置）。
+- `{"rest": True}` 兜底收掉剩下的两张侧面，避免了"同一个名字建两次命名选择"的问题。
+
+实测（Domain 60×40×40、圆柱 r=5 贯穿）：
+
+| 名称 | 面数 | 面积 mm² | 面心 | loops |
+|---|---|---|---|---|
+| inlet | 1 | 1600.00 | (0,20,20) | 1 |
+| outlet | 1 | 1600.00 | (60,20,20) | 1 |
+| obstacle | 1 | 1256.64 = 2π·5·40 | (30,20,20) | 2 |
+| top_wall | 1 | 2321.46 = 2400 − 78.54 | (30,20,40) | 2 |
+| bottom_wall | 1 | 2321.46 | (30,20,0) | 2 |
+| side_wall | 2 | 2400.00 各 | (30,0,20) / (30,40,20) | 1 |
+
+总面积 13899.56 mm²，与手算（盒子表面积 12800 + 孔壁 1256.64 − 两个圆口 157.08）一致 ✓。
+
