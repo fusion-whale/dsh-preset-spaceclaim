@@ -49,6 +49,48 @@ Shape helpers, all verified on this machine:
 
 The runner injects three constants into the composed script: `SCDM_SCRIPT_DIR` (the model script's own folder), `SCDM_LOG_PATH`, and `SCDM_API_VERSION`. The template uses `SCDM_SCRIPT_DIR` to keep outputs next to the script, so **`-Out` must be exactly the same path the script passes to `finish()`** — the runner checks that file, and a mismatch is reported as `artifact is missing` even though the build itself succeeded.
 
+## 1b. 自然语言边界条件 → 规则表
+
+命名那层本来就是开放的：`name_faces(名字, 面组)` 接受**任意 ASCII 名字**，所以"能不能做别的边界条件"实际等价于"能不能按描述挑对面"。主入口是规则表：
+
+```python
+name_faces_by_rules(body, [
+    ("inlet",       {"normal": "x", "sign": -1}),
+    ("outlet",      {"normal": "x", "sign": +1}),
+    ("symmetry",    {"at": ("y", 0.0)}),
+    ("heated_wall", {"normal": "z", "sign": -1, "in_box": (30, 70, None, None, None, None)}),
+    ("wall",        {"rest": True}),
+])
+```
+
+规则按顺序处理，**先匹配的面会被后面的规则排除**，所以 `{"rest": True}` 放最后就是"剩下的都算 wall"。面数为 0 的规则不会创建空分区。返回 `{名字: 面数}`。
+
+### 说法 → 规则对照
+
+| 用户这么说 | 规则 |
+|---|---|
+| 入口 / 出口（沿 X） | `{"normal":"x","sign":-1}` / `{"normal":"x","sign":1}` |
+| 顶面 / 底面 / 朝上的面 | `{"normal":"z","sign":1}` / `{"normal":"z","sign":-1}` |
+| 某一侧 / 在某个坐标上的面 | `{"normal":"y",...}` 或 `{"at":("y",0.0)}` |
+| z 在 50~150 那一段 | `{"between":("z",50,150)}` |
+| 某个角、某一块区域 | `{"in_box":(0,50,0,20,None,None)}`（某维 None = 不限） |
+| 包含点 (10,0,5) 的面 | `{"point":(10,0,5)}` |
+| 离某个点最近的面 | `{"nearest":(10,0,5)}` |
+| 最大的面 / 小的圆端面 | `{"area_min":100}` / `{"area_max":5}` |
+| 管子内壁、圆柱面、锥面 | `{"kind":"cylinder"}`（还支持 `cone`/`sphere`/`torus`） |
+| 平面端面 | `{"kind":"plane"}` |
+| 对称面 | 通常 `{"at":("y",0.0)}` 或 `{"normal":"y","sign":-1}` |
+| 剩下的都算壁面 | `{"rest":True}` |
+| 多入口 / 多出口 | 用不同规则分开命名：`inlet_main` / `inlet_secondary` |
+| 交界面、共轭传热耦合面 | 对**另一个 body** 调同样的规则（`name_faces_by_rules(other, ...)`） |
+
+也可以直接用原语自己组合谓词：`faces_by_normal` / `faces_by_kind` / `faces_by_area` / `face_at_point` / `nearest_face` / `faces_in_box` / `faces_at` / `faces_between` / `faces_where`。
+
+### 两个必须知道的限制
+
+1. **整面判定、按面心定位**：`match_faces` 不会把一个大面切成几段。如果底面是**一整张面**，`{"between":("x",30,70)}` 只会整体命中或不命中（看它的面心落在哪）。真要"半段加热"必须先做**面分割**（`SplitFace`），目前没封装。
+2. **边界条件的"类型"不在 SpaceClaim 里设**。这里只决定"哪些面叫什么名字"；`velocity-inlet` / `pressure-outlet` / `wall` / `symmetry` / `periodic` / `fan` / `porous-jump` / `interface` 这些类型是在 Fluent 或 Mechanical 里赋给同名分区的。名字必须是 ASCII。
+
 ## 2. Run it
 
 ```powershell
@@ -77,6 +119,8 @@ The runner composes the script, runs the verified command line, and judges succe
 | Cylinder | `CylinderBody.Create(center, start, end)` = centre of the defining circle, centre of the **far base**, a point on that far base's circle. `start` sets axis + length; `end` sets the radius. |
 | Result members | `BlockBodyResult`/`SphereResult` have `CreatedBody`; **`CylinderBodyResult` only has `CreatedBodies`**. `scdm_lib.cylinder()` handles both. |
 | Curved faces | A closed circular edge's `StartPoint`/`EndPoint` return the **circle centre**, so measuring a curved face from endpoints alone collapses its extents. `scdm_lib` samples edges with `GetPolyline(PolylineOptions())` instead. |
+| Face normal | `Geometry.Plane` has **no `.Normal`** — the normal is `plane.Frame.DirZ`, and `face.Shape.IsReversed` may flip it. `scdm_lib.face_normal()` handles both and returns `None` for non-planar faces. `face_kind()` reads the geometry type name (`Plane`/`Cylinder`/…), which is how `faces_by_kind` tells a pipe's bore from its outer wall. |
+| Rule selection semantics | `match_faces` decides **whole faces by their centre** — it cannot cut a face into pieces. A single big bottom face either matches `between` entirely or not at all; splitting a face needs `SplitFace`, which is not wrapped. |
 | Extrude call form | `ExtrudeFaces.Execute(selection, MM(distance), options)` — the recorded 3-arg form. **Passing an explicit `ICommandInfo` (even `None`) as the 5th argument makes the host abort the whole script with no traceback.** Same for omitting vs. filling optional parameters in general: branch to a shorter overload instead of passing `None`. |
 | Sketch facts | `SketchCircle.Create(Point2D, radius)` + `ViewHelper.SetViewMode(InteractionMode.Solid, None)` turns the closed profile into a surface body with one face — that face is what you extrude. The overload taking an explicit `Plane` does **not** produce such a face (0 bodies). The extrusion axis is the default work plane's normal: **Y** on this machine. A fresh document has **no datum planes** (`DatumPlanes.Count == 0`), so `SketchPlane.ActivateDatum` has nothing to activate. |
 | Cone / frustum | **Not reachable from the script API here.** `Loft.Create(sel1, sel2, LoftOptions(), None)` rejects every construction tried: raw `DesignCurve` selections, `.ConvertToCurves()` selections, and disc faces all fail with *"The Loft command must include Bodies, Faces, Edges, Curves, or Points selection"*; the sketch curves returned by `SketchCircleResult.CreatedCurve` are invalidated by the Solid-mode switch. `Geometry.Profile` has no public factory (it is sheet-metal only), so `ExtrudeProfile` is unusable too. Use `stepped_cone` or build the cone in the GUI. |
@@ -103,9 +147,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_cylinder.py"       -Out "$S\tests\selftest_cylinder.scdocx"       -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_channel_4x4x10.py" -Out "$S\tests\selftest_channel_4x4x10.scdocx" -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_solids.py"         -Out "$S\tests\selftest_solids.scdocx"         -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_boundaries.py"     -Out "$S\tests\selftest_boundaries.scdocx"     -Verify
 ```
 
-All four must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All five must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -113,6 +158,7 @@ All four must end in `[scdm] status=ok` and print the verify block. Regression b
 | `selftest_cylinder` | `5.000 x 5.000 x 30.000 mm` | inlet 19.63 mm² @ z=0 · outlet 19.63 mm² @ z=30 · wall_1 471.24 mm² @ z=15 |
 | `selftest_channel_4x4x10` | `4.000 x 4.000 x 10.000 mm` | inlet 16.00 mm² @ z=0 · outlet 16.00 mm² @ z=10 · wall 4 faces × 40.00 mm² @ z=5 |
 | `selftest_solids` | 4 bodies: `Plate 20x20x4` (7 faces) · `Pipe 30x12x12` (4 faces) · `Cube 5x5x5` · `Sep 6x6x6` | inlet 62.83 mm² @ x=40 · outlet 62.83 mm² @ x=70 · wall 2 faces (outer 1130.97 + bore 753.98 mm²) |
+| `selftest_boundaries` | 2 bodies: `Channel 100x40x40` · `Pipe 30x12x12` | 7 groups: inlet 1600 mm² @ (0,20,20) · outlet 1600 mm² @ (100,20,20) · symmetry 4000 mm² @ (50,0,20) · wall 3 faces × 4000 mm² · pipe_inlet/pipe_outlet 62.83 mm² @ x=0/30 · pipe_wall 1130.97 + 753.98 mm² |
 
 Run these before blaming a new model script.
 
@@ -122,7 +168,7 @@ Run these before blaming a new model script.
 - Keep the success judgement on the `<<<SCDM_OK>>>` sentinel, never on SpaceClaim's exit code (it is 0 even for a failed script).
 - `verify_model.py` must stay independent: it re-opens the artifact from disk in a fresh session and never trusts the build script's own prints.
 - Syntax-check `scdm_lib.py` with `python -c "p=r'…\scdm_lib.py'; compile(open(p).read(), p, 'exec'); print('ok')"`. Do **not** use `py_compile`, which drops a `__pycache__` directory into the bundle.
-- After **any** change to `scdm_lib.py`, re-run all four self-tests. The library's function signatures changed once already, which silently invalidated earlier passes.
+- After **any** change to `scdm_lib.py`, re-run all five self-tests. The library's function signatures changed once already, which silently invalidated earlier passes.
 
 ## 7. GUI escape hatch
 

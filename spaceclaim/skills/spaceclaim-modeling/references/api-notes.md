@@ -226,3 +226,59 @@ ExtrudeFaces.Execute(Selection.Create(faces[0]), MM(10), ExtrudeFaceOptions())
 
 `scdm_lib._created_body()` 依次尝试 `CreatedBody`、`CreatedBodies[0]`，最后兜底取
 根零件里最后一个体。
+
+## 8. 面的法向、类型与通用选面（第 5 个回归用例实测）
+
+### 8.1 法向：Plane 上没有 .Normal
+
+```python
+g = face.Shape.Geometry           # 平面面 → Geometry.Plane
+n = g.Frame.DirZ                  # 法向在这里（X/Y/Z 三个分量）
+if face.Shape.IsReversed:         # 同一个平面可能被面反向引用，必须看这个标志
+    n = (-n.X, -n.Y, -n.Z)
+```
+
+`Geometry.Plane` 暴露的是 `Frame`（含 `Origin`/`DirX`/`DirY`/`DirZ`），**没有 `.Normal`**。
+非平面面拿不到法向，`scdm_lib.face_normal()` 对它们返回 `None`。
+
+### 8.2 面类型：区分外壁和内壁
+
+```python
+type(face.Shape.Geometry).__name__   # 'Plane' / 'Cylinder' / 'Cone' / 'Sphere' / 'Torus'
+```
+
+管子外壁和内壁**都是 `Cylinder`**，靠类型分不开；这时要用 `{"rest": True}` 的先后顺序，
+或者按面积/位置区分。`scdm_lib.face_kind()` 就是取这个类型名。
+
+`Modeler.Face.ContainsPoint(Geometry.Point)` 可以判断某点是否在面上——`face_at_point()` 用它，
+配合 `nearest_face()`（按面心距离）应付"点没精确落在面上"的情况。
+
+### 8.3 选面语义：整面判定、按面心定位
+
+`match_faces` **不做面分割**。实测一个 100×40×40 的长方体（6 个面）：
+
+| 调用 | 结果 |
+|---|---|
+| `faces_by_normal(body, "z", -1)` | 1 |
+| `faces_by_kind(body, "plane")` | 6 |
+| `face_at_point(body, 50, 20, 0)` | 1 |
+| `faces_by_area(body, min_area=3000)` | 4 |
+| `faces_in_box(body, xmax=50)` | 5 |
+
+含义：`{"between": ("x", 30, 70)}` 对一整张底面只会**整体命中或整体不命中**（看它的面心落在哪），
+不能只切一段出来。要"半段加热"必须先做面分割（`SplitFace`），目前没封装。
+
+### 8.4 第 5 个回归用例（selftest_boundaries）的基线
+
+`Channel 100x40x40` + `Pipe 30x12x12`，7 个命名选择：
+
+| 名字 | 面数 | 面心 | 面积 mm² |
+|---|---|---|---|
+| inlet | 1 | (0,20,20) | 1600.00 |
+| outlet | 1 | (100,20,20) | 1600.00 |
+| symmetry | 1 | (50,0,20) | 4000.00 |
+| wall | 3 | (50,40,20)/(50,20,40)/(50,20,0) | 4000.00 各 |
+| pipe_inlet | 1 | (0,100,0) | 62.83 |
+| pipe_outlet | 1 | (30,100,0) | 62.83 |
+| pipe_wall | 2 | (15,100,0) | 1130.97 + 753.98 |
+

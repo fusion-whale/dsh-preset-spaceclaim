@@ -476,6 +476,293 @@ def name_boundaries(body, bottom="inlet", top="outlet", sides="wall",
 
 
 # ---------------------------------------------------------------------------
+# 通用选面：把"自然语言描述"翻译成面组
+#
+# 命名那层本来就是开放的（name_faces 接受任意 ASCII 名字），真正需要的是
+# "按什么挑面"这一层。下面这些函数配合 match_faces / name_faces_by_rules，
+# 覆盖 CFD 里绝大多数边界条件的描述方式。
+# ---------------------------------------------------------------------------
+
+def _face_key(face):
+    """面的稳定标识（用 Moniker 而不是对象 id：重复遍历 body.Faces 可能给出不同的包装对象）。"""
+    try:
+        return str(face.Moniker)
+    except:
+        return str(id(face))
+
+
+def face_normal(face):
+    """平面面的单位法向 (nx, ny, nz)；非平面面返回 None。
+
+    实测：Geometry.Plane 上没有 .Normal，法向在 Plane.Frame.DirZ 上；
+    面的朝向还要看 IsReversed（同一个平面可能被面反向引用）。
+    """
+    shape = _shape_of(face)
+    try:
+        g = shape.Geometry
+        if str(type(g).__name__) != "Plane":
+            return None
+        d = g.Frame.DirZ
+        n = (d.X, d.Y, d.Z)
+    except:
+        return None
+    try:
+        if shape.IsReversed:
+            n = (-n[0], -n[1], -n[2])
+    except:
+        pass
+    L = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) ** 0.5
+    if L <= 0.0:
+        return None
+    return (n[0] / L, n[1] / L, n[2] / L)
+
+
+def face_kind(face):
+    """面的几何类型（小写）：'plane' / 'cylinder' / 'cone' / 'sphere' / 'torus' / 'unknown'。"""
+    try:
+        return str(type(_shape_of(face).Geometry).__name__).lower()
+    except:
+        return "unknown"
+
+
+def _dir_vector(axis):
+    i = _axis_index(axis)
+    return (1.0 if i == 0 else 0.0, 1.0 if i == 1 else 0.0, 1.0 if i == 2 else 0.0)
+
+
+def faces_by_normal(body, axis="z", sign=1, tol=0.99):
+    """法向朝向某轴的面。sign=+1 朝正向，-1 朝负向。
+
+    对应"朝上的面""底面""朝向 +X 的那一面"。只有平面面有法向，
+    圆柱侧面等一律不入选（要圆柱面用 faces_by_kind(body, "cylinder")）。
+    """
+    d = _dir_vector(axis)
+    out = []
+    for f in body.Faces:
+        n = face_normal(f)
+        if n is None:
+            continue
+        dot = n[0] * d[0] + n[1] * d[1] + n[2] * d[2]
+        if (sign >= 0 and dot >= tol) or (sign < 0 and dot <= -tol):
+            out.append(f)
+    return out
+
+
+def faces_by_kind(body, kind):
+    """按几何类型挑面：'plane'（平面）/ 'cylinder'（圆柱面）/ 'cone' / 'sphere' / 'torus'。
+
+    对应"管子内壁"（cylinder）、"圆端面"（plane）、"锥面段"这类说法。
+    """
+    k = str(kind).lower()
+    return [f for f in body.Faces if face_kind(f) == k]
+
+
+def faces_by_area(body, min_area=None, max_area=None, tol=1e-6):
+    """按面积挑面，单位 mm^2。对应"最大的那个面""面积小于 1 的小面"。"""
+    out = []
+    for f in body.Faces:
+        a = face_area(f)
+        if min_area is not None and a < min_area - tol:
+            continue
+        if max_area is not None and a > max_area + tol:
+            continue
+        out.append(f)
+    return out
+
+
+def face_at_point(body, x, y, z):
+    """包含给定点的面（点恰好落在公共边上时可能返回多个）。"""
+    p = Point.Create(MM(x), MM(y), MM(z))
+    out = []
+    for f in body.Faces:
+        try:
+            if _shape_of(f).ContainsPoint(p):
+                out.append(f)
+        except:
+            pass
+    return out
+
+
+def nearest_face(body, x, y, z):
+    """离给定点最近的面（按面心距离）。点难精确落在面上时用这个。"""
+    best = None
+    best_d = None
+    for f in body.Faces:
+        c = face_center(f)
+        d = (c[0] - x) ** 2 + (c[1] - y) ** 2 + (c[2] - z) ** 2
+        if best_d is None or d < best_d:
+            best_d = d
+            best = f
+    return best
+
+
+def faces_in_box(body, xmin=None, xmax=None, ymin=None, ymax=None,
+                 zmin=None, zmax=None, tol=1e-3):
+    """面心落在给定长方体范围内的面（每一维都可以传 None 表示不限）。
+
+    对应"左上角那一片""x 在 0~50 且 z 在 100 以上的面"。
+    """
+    lo = (xmin, ymin, zmin)
+    hi = (xmax, ymax, zmax)
+    out = []
+    for f in body.Faces:
+        c = face_center(f)
+        ok = True
+        for i in range(3):
+            if lo[i] is not None and c[i] < lo[i] - tol:
+                ok = False
+                break
+            if hi[i] is not None and c[i] > hi[i] + tol:
+                ok = False
+                break
+        if ok:
+            out.append(f)
+    return out
+
+
+def match_faces(body, rule, exclude=None):
+    """按一条规则挑面。rule 是 dict，支持的键可以任意组合（组合即取交集）：
+
+      normal    : "x"/"y"/"z" 或 (nx,ny,nz) —— 法向朝向
+      sign      : +1 / -1（配合 normal，默认 +1）
+      at        : (轴, 值)          —— 面心在该轴坐标等于该值
+      between   : (轴, lo, hi)      —— 面心在该轴坐标落在区间内
+      in_box    : (xmin,xmax,ymin,ymax,zmin,zmax)，某一维可为 None
+      area_min  : 面积下限 mm^2
+      area_max  : 面积上限 mm^2
+      kind      : "plane" / "cylinder" / ...
+      point     : (x,y,z)           —— 包含该点的面
+      nearest   : (x,y,z)           —— 离该点最近的面
+      rest      : True              —— exclude 之后剩下的所有面（兜底 wall 用）
+      all       : True              —— 所有面
+      tol       : 位置容差 mm（默认 1e-3）
+
+    exclude 是"已经被前面的规则用掉"的面集合（{face_key: 1}）。
+    单次遍历 body.Faces 完成判定，避免重复枚举时拿到不同的包装对象。
+    """
+    tol = rule.get("tol", 1e-3)
+
+    point_keys = None
+    if "point" in rule:
+        p = rule["point"]
+        point_keys = {}
+        for f in face_at_point(body, p[0], p[1], p[2]):
+            point_keys[_face_key(f)] = 1
+
+    nearest_key = None
+    if "nearest" in rule:
+        p = rule["nearest"]
+        nf = nearest_face(body, p[0], p[1], p[2])
+        nearest_key = _face_key(nf) if nf is not None else None
+
+    d = None
+    if "normal" in rule:
+        nd = rule["normal"]
+        d = nd if isinstance(nd, (tuple, list)) else _dir_vector(nd)
+        L = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) ** 0.5
+        if L > 0:
+            d = (d[0] / L, d[1] / L, d[2] / L)
+    sign = rule.get("sign", 1)
+    kind = str(rule["kind"]).lower() if "kind" in rule else None
+    at_i = at_v = None
+    if "at" in rule:
+        at_i = _axis_index(rule["at"][0])
+        at_v = rule["at"][1]
+    bt_i = bt_lo = bt_hi = None
+    if "between" in rule:
+        bt_i = _axis_index(rule["between"][0])
+        bt_lo = rule["between"][1]
+        bt_hi = rule["between"][2]
+    box_lo = box_hi = None
+    if "in_box" in rule:
+        b = rule["in_box"]
+        box_lo = (b[0], b[2], b[4])
+        box_hi = (b[1], b[3], b[5])
+    a_min = rule.get("area_min")
+    a_max = rule.get("area_max")
+    plain_rest = bool(rule.get("rest"))
+    take_all = bool(rule.get("all"))
+
+    out = []
+    for f in body.Faces:
+        key = _face_key(f)
+        if exclude is not None and key in exclude:
+            continue
+        if plain_rest or take_all:
+            out.append(f)
+            continue
+        c = face_center(f)
+        if kind is not None and face_kind(f) != kind:
+            continue
+        if d is not None:
+            n = face_normal(f)
+            if n is None:
+                continue
+            dot = n[0] * d[0] + n[1] * d[1] + n[2] * d[2]
+            if (sign >= 0 and dot < 0.99) or (sign < 0 and dot > -0.99):
+                continue
+        if at_i is not None and abs(c[at_i] - at_v) > tol:
+            continue
+        if bt_i is not None and (c[bt_i] < bt_lo - tol or c[bt_i] > bt_hi + tol):
+            continue
+        if box_lo is not None:
+            inside = True
+            for i in range(3):
+                if box_lo[i] is not None and c[i] < box_lo[i] - tol:
+                    inside = False
+                    break
+                if box_hi[i] is not None and c[i] > box_hi[i] + tol:
+                    inside = False
+                    break
+            if not inside:
+                continue
+        if a_min is not None or a_max is not None:
+            a = face_area(f)
+            if a_min is not None and a < a_min - 1e-6:
+                continue
+            if a_max is not None and a > a_max + 1e-6:
+                continue
+        if point_keys is not None and key not in point_keys:
+            continue
+        if nearest_key is not None and key != nearest_key:
+            continue
+        out.append(f)
+    return out
+
+
+def name_faces_by_rules(body, rules, tol=1e-3):
+    """按规则表批量命名边界——"把自然语言描述翻成命名选择"的主入口。
+
+    rules 是 (名字, 规则 dict) 的列表，按顺序处理：先匹配的面会被后面的规则排除，
+    所以 {"rest": True} 放在最后就是"剩下的都算 wall"。
+
+        name_faces_by_rules(body, [
+            ("inlet",       {"normal": "x", "sign": -1}),
+            ("outlet",      {"normal": "x", "sign": +1}),
+            ("symmetry",    {"at": ("y", 0.0)}),
+            ("heated_wall", {"normal": "z", "sign": -1,
+                             "between": ("x", 30.0, 70.0)}),
+            ("wall",        {"rest": True}),
+        ])
+
+    返回 {名字: 面数}；面数为 0 的规则不会创建命名选择（避免空分区）。
+    """
+    used = {}
+    counts = {}
+    for name, rule in rules:
+        r = dict(rule)
+        if "tol" not in r:
+            r["tol"] = tol
+        faces = match_faces(body, r, exclude=used)
+        counts[name] = len(faces)
+        if faces:
+            name_faces(name, faces)
+            for f in faces:
+                used[_face_key(f)] = 1
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # 保存与输出
 # ---------------------------------------------------------------------------
 
