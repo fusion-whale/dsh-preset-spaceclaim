@@ -149,14 +149,20 @@ SpaceClaim 启动时会写 `%APPDATA%\SpaceClaim\Log Files\*`、`Journal Files\*
 workspace-write 会让它**静默退出（exit 0、不产生任何日志）**。
 所以调用运行器时必须放宽到 `danger-full-access`。
 
-## 6. 实测残余误差（诚实记录）
+## 6. 面心算法：为什么用包围盒中心（曾经踩过的坑）
 
-用默认 `PolylineOptions()` 离散圆边时，采样点不一定正好落在极值位置上，
-所以曲面的面心在**平面内**会有小幅偏差（实测 r=2.5 mm 的圆盖面心 x 偏 0.061 mm）。
-**沿面法向的坐标是精确的**，因此 `name_boundaries` 按轴分类不受影响
-（圆柱用例里 inlet/outlet 的 z 恰好是 0.000 / 30.000）。
-需要更精确可给 `PolylineOptions(curveDeviation, angleDeviation, maxChordLength)`
-传更小的偏差值（单位是米），代价是采样点变多。
+`face_center()` 原来用**边界采样点的平均值**，实测暴露了两个问题：
+
+1. 采样偏差：默认 `PolylineOptions()` 离散圆边时采样点不一定落在极值位置，
+   r=2.5 的圆盖面心会偏 0.061 mm。
+2. **切面后失真**（更严重）：面被切分后会多出共线顶点，平均值被拉偏——
+   100×40×40 的体在底面 x=50 处切开后，y=0 那张侧面的"平均点"z 从 20 变成 **16**。
+
+改成**包围盒中心** `(min+max)/2` 后两个问题都消失：矩形面本来就精确，
+圆盖面心从 0.061 回到 **0.000**，管壁面心从 0.122 回到 **0.000**（第 6 轮回归实测）。
+规则表按面心定位，所以这一点必须稳。
+
+代价：对**非凸面**（L 形面之类）包围盒中心可能落在面外——目前几何都是规则体，不受影响。
 
 ## 7. 建体命令的 ExtrudeType 与草图/放样（本轮实测）
 
@@ -281,4 +287,21 @@ type(face.Shape.Geometry).__name__   # 'Plane' / 'Cylinder' / 'Cone' / 'Sphere' 
 | pipe_inlet | 1 | (0,100,0) | 62.83 |
 | pipe_outlet | 1 | (30,100,0) | 62.83 |
 | pipe_wall | 2 | (15,100,0) | 1130.97 + 753.98 |
+
+## 9. 面分割与体分割（第 6 个回归用例实测）
+
+| 调用 | 作用 | 实测结果 |
+|---|---|---|
+| `SplitFace.ByTwoPoints(faceSel, p1, p2)` | 用面上两点连线切面 | 100×40 的底面用 (50,0,0)-(50,40,0) 切开 → 一张变两张 2000 mm²，面心 (25,20,0) / (75,20,0)。**三参 / 四参 / 五参（含 `SplitFaceOptions()`）形式都能用** |
+| `SplitBody.ByCutter(bodySel, Plane, None)` | 用平面切体 | 100×40×40 在 x=50 处切开 → **2 个体**，各 6 面 |
+
+要点：
+
+- 两个点必须落在被切的那张面上。
+- **切完原面对象就失效**，必须重新枚举 `body.Faces` 再取（`scdm_lib.split_face_by_line` 的注释里写了）。
+- 切面**不会改变相邻面的面积**（实测侧面仍是 4000 mm²），但会在相邻面的边界上多出共线顶点——
+  这正是 §6 里"平均值失真"的来源，也是改用包围盒中心的原因。
+- 构造平面的写法：`Plane.Create(Frame.Create(Point.Create(...), Direction.Create(nx,ny,nz)))`。
+- `SplitFace` 还有 `ByCutter`（用刀具体面）、`ByParametric`、`ByCurves`，`SplitBody` 还有
+  `ByCutter(sel, cutterSelection, …)`；都没用上，需要时再试。
 

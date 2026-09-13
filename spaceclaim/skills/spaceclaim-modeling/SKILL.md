@@ -88,7 +88,18 @@ name_faces_by_rules(body, [
 
 ### 两个必须知道的限制
 
-1. **整面判定、按面心定位**：`match_faces` 不会把一个大面切成几段。如果底面是**一整张面**，`{"between":("x",30,70)}` 只会整体命中或不命中（看它的面心落在哪）。真要"半段加热"必须先做**面分割**（`SplitFace`），目前没封装。
+1. **规则是整面判定、按面心定位**，它自己不会切面——但你可以**先切再选**：
+
+   ```python
+   bottom = faces_by_normal(body, "z", -1)[0]
+   split_face_by_line(bottom, axis="x", value=50.0)   # 一张底面切成两半
+   name_faces_by_rules(body, [                        # 现在能只选其中一半
+       ("heated_wall", {"normal": "z", "sign": -1, "in_box": (None, 50, None, None, None, None)}),
+       ("wall",        {"rest": True}),
+   ])
+   ```
+
+   `split_face_by_points(face, p1, p2)` 用面上两点定切分线；`split_face_by_line(face, axis, value)` 自动算端点（只对轴对齐的平面面可靠）；`split_body_by_plane(body, axis, value)` 把整个体切成两个（实测 2 个体）。**切完原面对象会失效，必须重新取面。**
 2. **边界条件的"类型"不在 SpaceClaim 里设**。这里只决定"哪些面叫什么名字"；`velocity-inlet` / `pressure-outlet` / `wall` / `symmetry` / `periodic` / `fan` / `porous-jump` / `interface` 这些类型是在 Fluent 或 Mechanical 里赋给同名分区的。名字必须是 ASCII。
 
 ## 2. Run it
@@ -148,9 +159,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_channel_4x4x10.py" -Out "$S\tests\selftest_channel_4x4x10.scdocx" -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_solids.py"         -Out "$S\tests\selftest_solids.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_boundaries.py"     -Out "$S\tests\selftest_boundaries.scdocx"     -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_split.py"          -Out "$S\tests\selftest_split.scdocx"          -Verify
 ```
 
-All five must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All six must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -159,6 +171,7 @@ All five must end in `[scdm] status=ok` and print the verify block. Regression b
 | `selftest_channel_4x4x10` | `4.000 x 4.000 x 10.000 mm` | inlet 16.00 mm² @ z=0 · outlet 16.00 mm² @ z=10 · wall 4 faces × 40.00 mm² @ z=5 |
 | `selftest_solids` | 4 bodies: `Plate 20x20x4` (7 faces) · `Pipe 30x12x12` (4 faces) · `Cube 5x5x5` · `Sep 6x6x6` | inlet 62.83 mm² @ x=40 · outlet 62.83 mm² @ x=70 · wall 2 faces (outer 1130.97 + bore 753.98 mm²) |
 | `selftest_boundaries` | 2 bodies: `Channel 100x40x40` · `Pipe 30x12x12` | 7 groups: inlet 1600 mm² @ (0,20,20) · outlet 1600 mm² @ (100,20,20) · symmetry 4000 mm² @ (50,0,20) · wall 3 faces × 4000 mm² · pipe_inlet/pipe_outlet 62.83 mm² @ x=0/30 · pipe_wall 1130.97 + 753.98 mm² |
+| `selftest_split` | 3 bodies: `Channel 100x40x40` (7 faces) · `SplitMe` 20x20x10 · `SplitMe1` 20x20x10 | inlet 1600 mm² @ (0,20,20) · outlet 1600 mm² @ (100,20,20) · heated_wall 2000 mm² @ (25,20,0) · wall 4 faces (4000×3 + 2000 @ (75,20,0)) |
 
 Run these before blaming a new model script.
 

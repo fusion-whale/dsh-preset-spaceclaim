@@ -334,23 +334,37 @@ def _edge_points(edge):
         return []
 
 
+def face_extent(face):
+    """面的包围盒 ([minx,miny,minz], [maxx,maxy,maxz])，单位 mm。"""
+    lo = [None, None, None]
+    hi = [None, None, None]
+    for e in _shape_of(face).Edges:
+        for p in _edge_points(e):
+            vals = (p.X, p.Y, p.Z)
+            for i in range(3):
+                v = vals[i]
+                if lo[i] is None or v < lo[i]:
+                    lo[i] = v
+                if hi[i] is None or v > hi[i]:
+                    hi[i] = v
+    if lo[0] is None:
+        raise RuntimeError("cannot compute face extent: the face exposes no usable edge")
+    return ([lo[0] * 1000.0, lo[1] * 1000.0, lo[2] * 1000.0],
+            [hi[0] * 1000.0, hi[1] * 1000.0, hi[2] * 1000.0])
+
+
 def face_center(face):
-    """面心坐标 (x, y, z)，单位 mm。
+    """面的中心 = **包围盒中心**，单位 mm。
+
+    为什么不用边界采样点的平均值：面被切分之后会多出共线顶点，平均值会被拉偏。
+    实测：100x40x40 的体在底面 x=50 处切开后，y=0 那张侧面的"平均点"z 从 20 变成 16，
+    而包围盒中心仍然是 20。规则表按面心定位，所以这一点必须稳。
 
     注意：脚本里的面是 DesignFace 包装对象，真实几何要通过 face.Shape 取。
     直接用 face.Edges 会报 'DesignEdge' object has no attribute 'StartPoint'。
     """
-    sx = sy = sz = 0.0
-    n = 0
-    for e in _shape_of(face).Edges:
-        for p in _edge_points(e):
-            sx += p.X
-            sy += p.Y
-            sz += p.Z
-            n += 1
-    if n == 0:
-        raise RuntimeError("cannot compute face centre: the face exposes no usable edge")
-    return (sx / n * 1000.0, sy / n * 1000.0, sz / n * 1000.0)
+    lo, hi = face_extent(face)
+    return ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0)
 
 
 def face_area(face):
@@ -760,6 +774,69 @@ def name_faces_by_rules(body, rules, tol=1e-3):
             for f in faces:
                 used[_face_key(f)] = 1
     return counts
+
+
+# ---------------------------------------------------------------------------
+# 面分割 / 体分割：让"一张大面分几段分别命名"成为可能
+# ---------------------------------------------------------------------------
+
+def split_face_by_points(face, p1, p2):
+    """用面上的两点连成一条直线，把这张面切开。
+
+    实测：ByTwoPoints 的三参形式可用。例：100x40 的底面用 (50,0,0)-(50,40,0)
+    切开后变成两张 2000 mm^2 的面，面心分别在 (25,20,0) 与 (75,20,0)。
+
+    两点都要落在这张面上。**切完原面对象可能失效，要重新取面。**
+    """
+    return SplitFace.ByTwoPoints(Selection.Create(face),
+                                 Point.Create(MM(p1[0]), MM(p1[1]), MM(p1[2])),
+                                 Point.Create(MM(p2[0]), MM(p2[1]), MM(p2[2])))
+
+
+def split_face_by_line(face, axis="x", value=0.0, tol=1e-6):
+    """把一张面沿"axis = value"这条线切开（自动在该面内算出切分线的两个端点）。
+
+    只对**轴对齐的平面面**可靠。典型用法（一个底面上分两段热流）：
+
+        bottom = faces_by_normal(body, "z", -1)[0]
+        split_face_by_line(bottom, axis="x", value=50.0)
+        # 底面现在是两张 2000 mm^2 的面，面心 (25,20,0) / (75,20,0)，
+        # 之后用 {"in_box": (None, 50, ...)} 就能只选到其中一段
+    """
+    a_i = _axis_index(axis)
+    lo, hi = face_extent(face)
+    if value < lo[a_i] - tol or value > hi[a_i] + tol:
+        raise ValueError("split_face_by_line: %s=%.3f 不在这张面的范围内 (%.3f ~ %.3f)"
+                         % (axis, value, lo[a_i], hi[a_i]))
+    others = [i for i in range(3) if i != a_i]
+    others.sort(key=lambda i: hi[i] - lo[i], reverse=True)
+    j = others[0]
+    p1 = [0.0, 0.0, 0.0]
+    p2 = [0.0, 0.0, 0.0]
+    for k in range(3):
+        if k == j:
+            p1[k] = lo[k]
+            p2[k] = hi[k]
+        elif k == a_i:
+            p1[k] = value
+            p2[k] = value
+        else:
+            mid = (lo[k] + hi[k]) / 2.0
+            p1[k] = mid
+            p2[k] = mid
+    return split_face_by_points(face, p1, p2)
+
+
+def split_body_by_plane(body, axis="x", value=0.0):
+    """用一个坐标平面把实体切成两个体。
+
+    实测：100x40x40 的体在 x=50 处切开 → 2 个体，各 6 个面。
+    """
+    d = _dir_vector(axis)
+    pl = Plane.Create(Frame.Create(
+        Point.Create(MM(value * d[0]), MM(value * d[1]), MM(value * d[2])),
+        Direction.Create(d[0], d[1], d[2])))
+    return SplitBody.ByCutter(Selection.Create(body), pl, None)
 
 
 # ---------------------------------------------------------------------------
