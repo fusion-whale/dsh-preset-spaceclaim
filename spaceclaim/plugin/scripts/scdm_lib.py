@@ -349,9 +349,9 @@ def _anchor_prism(body, axis, origin):
 
 def polygon_prism(sides, radius, height, origin=(0.0, 0.0, 0.0), axis="z",
                   name="Body", rotation_deg=0.0):
-    """正多边形棱柱（单个）。内部走 polygon_prisms，只是包了一层。
+    """正多边形棱柱（单个）。是 polygon_prisms 的包装。
 
-    注意：**必须在文档还没有任何实体时调用**（见 polygon_prisms 的说明）。
+    注意：**必须在文档还没有任何实体时调用**（见 profile_prisms 的说明）。
     """
     return polygon_prisms([{
         "sides": sides, "radius": radius, "height": height,
@@ -361,81 +361,128 @@ def polygon_prism(sides, radius, height, origin=(0.0, 0.0, 0.0), axis="z",
 
 
 def polygon_prisms(profiles):
-    """一次建多个正多边形棱柱——非圆形截面的管道（六边形、八边形……）。
+    """一次建多个正多边形棱柱（polygon_prism 的批量形式）。"""
+    out = []
+    for p in profiles:
+        q = dict(p)
+        q["kind"] = "polygon"
+        out.append(q)
+    return profile_prisms(out)
 
-    profiles 里每个元素是 dict：
-        sides        边数（>=3）
-        radius       外接圆半径 mm（草图第二点定义的是顶点）
+
+def profile_prisms(profiles):
+    """一次建多个「任意轮廓」棱柱——这是非圆形截面的通用入口。
+
+    profiles 里每个元素是 dict，公共键：
+        kind         "polygon" / "polyline" / "ellipse"（默认 "polygon"）
         height       长度 mm
         axis         "x"/"y"/"z"（棱柱轴向）
-        origin       底面中心（与 cylinder() 约定一致）
+        origin       摆正后**轮廓包围盒中心**所在的坐标（沿轴方向是底面）
         name         体名
-        rotation_deg 绕自身轴额外旋转的角度（可选）
+        rotation_deg 绕自身轴额外旋转（可选）
 
-    为什么必须是批量接口（这几条都是实测得出的）：
-      * **文档里一旦有实体，再新建草图就会让 SpaceClaim 抛空引用**（脚本直接中止）。
-        所以所有草图必须在任何实体存在之前一次画完。
-      * 多个**互不重叠**的草图在 Solid 模式下会各自成为一张面（一个表面体带 N 张面）；
-        重叠的草图会合并成一张，所以这里自动给每个草图拉开间距。
-      * 每拉伸一张面，草图体上剩下的面仍然可用，因此可以逐个拉伸。
+    各 kind 的专属键：
+        polygon   sides（边数）, radius（外接圆半径）
+        polyline  points=[(u,v), ...]  轮廓顶点，自动闭合（u 沿世界 X、v 沿世界 Z）
+        ellipse   radii=(a,b)          两个半轴
 
-    实测：六边形 r=5 h=20 沿 Z + 八边形 r=6 h=15 沿 X → 2 个体，
-    分别是 8 面 (10.000 x 8.660 x 20.000) 与 10 面 (15.000 x 12.000 x 11.086)。
+    轮廓坐标是**局部**的，批量接口会自动把各草图沿 X 拉开间距避免重叠。
+
+    为什么必须批量（这几条都是实测）：
+      * 文档里一旦有实体，再新建草图会让 SpaceClaim 抛空引用、脚本直接中止，
+        所以所有草图必须在任何实体之前一次画完；
+      * 互不重叠的草图在 Solid 模式下各成一张面（一个表面体带 N 张面），重叠的会合并；
+      * 逐张拉伸可行，草图体上剩下的面依然可用。
+
+    实测数值：梯形折线 (0,0)(20,0)(15,10)(5,10) → 端面 150.00 mm²、6 个面；
+    椭圆 (10,5) → 端面 157.08 mm²、3 个面、侧面 242.21 mm²。
     """
     ensure_document()
     existing = GetRootPart().Bodies.Count
     if existing:
         raise RuntimeError(
-            "polygon_prisms: the document already has %d body/bodies. Sketch-based profiles "
+            "profile_prisms: the document already has %d body/bodies. Sketch-based profiles "
             "must be created before any solid exists (SpaceClaim 2022 R1 crashes on a new "
-            "sketch once a solid is present). Build the polygon ducts first, then add "
+            "sketch once a solid is present). Build the profile ducts first, then add "
             "box/cylinder/tube bodies." % existing)
     if not profiles:
         return []
 
-    spacing = 10.0
+    # 1) 算间距：按每个轮廓的半宽留 1.5 倍余量，保证互不重叠
+    half = []
     for p in profiles:
-        need = float(p.get("radius", 1.0)) * 4.0
-        if need > spacing:
-            spacing = need
-    centers = []
+        k = str(p.get("kind", "polygon")).lower()
+        if k == "polyline":
+            pts = p.get("points") or [(0.0, 0.0)]
+            w = max(max(abs(u) for u, v in pts), max(abs(v) for u, v in pts))
+        elif k == "ellipse":
+            a, b = p.get("radii", (1.0, 1.0))
+            w = max(abs(a), abs(b))
+        else:
+            w = abs(float(p.get("radius", 1.0)))
+        half.append(max(w, 1.0))
+    widest = max(half)
+    spacing = widest * 3.0
+
+    # 2) 画草图（全部在任何实体之前）
+    offsets = []
     for i in range(len(profiles)):
         p = profiles[i]
-        r = float(p.get("radius", 1.0))
-        n = int(p.get("sides", 6))
-        if n < 3:
-            raise ValueError("polygon_prisms: sides must be at least 3")
-        cx = i * spacing
-        SketchPolygon.Create(Point.Create(MM(cx), MM(0), MM(0)),
-                             Point.Create(MM(cx + r), MM(0), MM(0)),
-                             False, n)
-        centers.append(cx)
+        k = str(p.get("kind", "polygon")).lower()
+        off = i * spacing
+        offsets.append(off)
+        if k == "polyline":
+            pts = p.get("points") or []
+            if len(pts) < 3:
+                raise ValueError("profile_prisms: polyline needs at least 3 points")
+            lst = List[Point]()
+            for (u, v) in pts:
+                lst.Add(Point.Create(MM(off + u), MM(0), MM(v)))
+            first = pts[0]
+            lst.Add(Point.Create(MM(off + first[0]), MM(0), MM(first[1])))
+            SketchLine.CreatePolyLine(lst, False, False)
+        elif k == "ellipse":
+            a, b = p.get("radii", (1.0, 1.0))
+            SketchEllipse.Create(Point.Create(MM(off), MM(0), MM(0)),
+                                 Direction.Create(1, 0, 0), Direction.Create(0, 0, 1),
+                                 MM(a), MM(b))
+        else:
+            n = int(p.get("sides", 6))
+            r = float(p.get("radius", 1.0))
+            if n < 3:
+                raise ValueError("profile_prisms: polygon sides must be at least 3")
+            SketchPolygon.Create(Point.Create(MM(off), MM(0), MM(0)),
+                                 Point.Create(MM(off + r), MM(0), MM(0)),
+                                 False, n)
 
     ViewHelper.SetViewMode(InteractionMode.Solid, None)
     sketch_body = _sketch_region_body({})
     if sketch_body is None:
-        raise RuntimeError("polygon_prisms: the sketches did not produce a region body")
+        raise RuntimeError("profile_prisms: the sketches did not produce a region body")
 
+    # 3) 逐个拉伸 + 摆正（按"离哪个偏移最近"把面分给对应轮廓）
     out = []
     for i in range(len(profiles)):
         p = profiles[i]
         target = None
+        best = None
         for f in list(sketch_body.Faces):
-            if abs(face_center(f)[0] - centers[i]) <= 1e-3:
+            d = abs(face_center(f)[0] - offsets[i])
+            if best is None or d < best:
+                best = d
                 target = f
-                break
         if target is None:
-            raise RuntimeError("polygon_prisms: sketch face %d not found" % i)
+            raise RuntimeError("profile_prisms: no sketch face left for profile %d" % i)
         body = _extrude_face(target, float(p.get("height", 10.0)))
         if body is None:
-            raise RuntimeError("polygon_prisms: extrude produced no body for profile %d" % i)
+            raise RuntimeError("profile_prisms: extrude produced no body for profile %d" % i)
         a = str(p.get("axis", "z")).lower()
         if a == "z":
             rotate(body, 90.0, axis="x")
         elif a == "x":
             rotate(body, -90.0, axis="z")
         elif a != "y":
-            raise ValueError("polygon_prisms: axis must be 'x'/'y'/'z'")
+            raise ValueError("profile_prisms: axis must be 'x'/'y'/'z'")
         rd = float(p.get("rotation_deg", 0.0))
         if rd:
             rotate(body, rd, axis=a)

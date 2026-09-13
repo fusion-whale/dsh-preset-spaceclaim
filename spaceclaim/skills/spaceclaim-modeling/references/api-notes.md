@@ -422,3 +422,36 @@ SpaceClaim 里"一个体"在 Fluent Meshing 里通常就是一个 cell zone，�
 `axis="z"` → 绕 X 转 +90°；`axis="x"` → 绕 Z 转 −90°；`axis="y"` → 不转。
 最后用 `_anchor_prism()` 把底面中心对齐到 origin（与 `cylinder()` 的约定一致）。
 
+## 13. 任意轮廓：折线与椭圆（第 10 个回归用例实测）
+
+### 13.1 两个可用的画法
+
+| 轮廓 | 调用 | 实测 |
+|---|---|---|
+| 任意折线 | `SketchLine.CreatePolyLine(List[Point], False, False)` | 梯形 (0,0)(20,0)(15,10)(5,10) → 端面 **150.00 mm²**（=(20+10)/2×10）；拉伸 20 后 6 个面，侧面 400.00 / 200.00 / 223.61×2 |
+| 椭圆 | `SketchEllipse.Create(Point, Direction, Direction, Double, Double)` | 半轴 10 与 5 → 端面 **157.08 mm²**（=π·10·5）；拉伸 15 后 3 个面，侧面 **726.63 mm²**（≈周长 48.44×15） |
+
+折线要**显式闭合**（末点 = 首点），点用 3D `Point.Create(MM(u), MM(0), MM(v))`——
+草图平面是 **y=0 的 XZ 平面**，u 沿世界 X、v 沿世界 Z。
+
+`List[Point]` 由脚本宿主预加载（`from System.Collections.Generic import List`），
+直接写 `lst = List[Point]()` 即可。
+
+`SketchLine` 还有 `Create(Point, Point, bool, bool)`、`CreateChain(IList[Point], bool)`；
+`SketchArc` 有 `Create3PointArc` / `Create` / `CreateSweepArc`——都还没试。
+
+### 13.2 profile_prisms 的通用化
+
+三种轮廓（polygon / polyline / ellipse）共用同一套批量机制：
+所有草图先画完（互不重叠）→ 一次 Solid → 逐个拉伸 → rotate 摆正 → 按包围盒中心锚定。
+
+轮廓坐标是**局部**的，批量接口按每个轮廓的半宽自动算间距（`spacing = max(最大半宽)*3`），
+拉完再用"离哪个偏移最近"把 Solid 之后的面分配给对应轮廓。
+
+### 13.3 案例数值（selftest_profile）
+
+| 体 | bbox | 面数 | 端面 | 侧面 |
+|---|---|---|---|---|
+| TrapDuct | 20.000 × 10.000 × 20.000 | 6 | 150.00 ×2 | 400.00 / 200.00 / 223.61 ×2 |
+| EllipDuct | 15.000 × 20.000 × 10.000 | 3 | 157.08 ×2 | 726.63 |
+
