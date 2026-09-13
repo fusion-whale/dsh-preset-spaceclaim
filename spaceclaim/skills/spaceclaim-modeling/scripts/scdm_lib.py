@@ -1101,6 +1101,7 @@ def match_faces(body, rule, exclude=None):
       area_min  : 面积下限 mm^2
       area_max  : 面积上限 mm^2
       kind      : "plane" / "cylinder" / ...
+      loops     : 边界环数量（1 = 简单面；2 = 中间有洞/被"盖章"的面）
       point     : (x,y,z)           —— 包含该点的面
       nearest   : (x,y,z)           —— 离该点最近的面
       rest      : True              —— exclude 之后剩下的所有面（兜底 wall 用）
@@ -1150,6 +1151,9 @@ def match_faces(body, rule, exclude=None):
         box_hi = (b[1], b[3], b[5])
     a_min = rule.get("area_min")
     a_max = rule.get("area_max")
+    want_loops = rule.get("loops")
+    if want_loops is not None:
+        want_loops = int(want_loops)
     plain_rest = bool(rule.get("rest"))
     take_all = bool(rule.get("all"))
 
@@ -1164,6 +1168,12 @@ def match_faces(body, rule, exclude=None):
         c = face_center(f)
         if kind is not None and face_kind(f) != kind:
             continue
+        if want_loops is not None:
+            try:
+                if len(list(_shape_of(f).Loops)) != want_loops:
+                    continue
+            except:
+                continue
         if d is not None:
             n = face_normal(f)
             if n is None:
@@ -1235,6 +1245,38 @@ def name_faces_by_rules(body, rules, tol=1e-3):
 # ---------------------------------------------------------------------------
 # 面分割 / 体分割：让"一张大面分几段分别命名"成为可能
 # ---------------------------------------------------------------------------
+
+def split_face_by_body(face, cutter_body, cutter_face=None):
+    """用**另一个体**的表面当刀，把目标面切开（在面上"盖章"出交线围成的区域）。
+
+    实测要点：刀具体必须传**面选择**，不能传体选择——
+    传整个体时 `SplitFace.ByCutter` 返回 `Success=False` 且什么都不做；
+    传刀具的侧面（如圆柱的柱面）就成功：40x40 的板底被 r=5 的圆柱切出
+    一张 78.54 mm² 的圆补丁 + 一张 1521.46 mm²、带内环(loops=2)的面。
+
+    不指定 cutter_face 时，会依次拿 cutter_body 的每张面去试，返回第一张成功的。
+    返回起作用的那张刀具面。
+    """
+    if cutter_face is not None:
+        candidates = [cutter_face]
+    else:
+        candidates = list(cutter_body.Faces)
+    for cf in candidates:
+        if cf is None:
+            continue
+        try:
+            res = SplitFace.ByCutter(Selection.Create(face),
+                                     Selection.Create(cf),
+                                     SplitFaceOptions())
+        except:
+            continue
+        try:
+            if res is not None and res.Success:
+                return cf
+        except:
+            continue
+    raise RuntimeError("split_face_by_body: no face of that body splits the target face")
+
 
 def split_face_by_points(face, p1, p2):
     """用面上的两点连成一条直线，把这张面切开。

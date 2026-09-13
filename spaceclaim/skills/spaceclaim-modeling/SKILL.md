@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -102,8 +102,9 @@ name_faces_by_rules(body, [
 | 包含点 (10,0,5) 的面 | `{"point":(10,0,5)}` |
 | 离某个点最近的面 | `{"nearest":(10,0,5)}` |
 | 最大的面 / 小的圆端面 | `{"area_min":100}` / `{"area_max":5}` |
-| 管子内壁、圆柱面、锥面 | `{"kind":"cylinder"}`（还支持 `cone`/`sphere`/`torus`） |
+| 管子内壁、圆柱面、锥面、球面 | `{"kind":"cylinder"}`（还支持 `cone`/`sphere`/`torus`） |
 | 平面端面 | `{"kind":"plane"}` |
+| 中间带洞的面 / 被盖章的补丁 | `{"loops":2}`（带内环）/ `{"loops":1}`（简单面）——**切分后两张面常常面心相同，只能靠它或面积区分** |
 | 对称面 | 通常 `{"at":("y",0.0)}` 或 `{"normal":"y","sign":-1}` |
 | 剩下的都算壁面 | `{"rest":True}` |
 | 多入口 / 多出口 | 用不同规则分开命名：`inlet_main` / `inlet_secondary` |
@@ -224,9 +225,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_profile.py"        -Out "$S\tests\selftest_profile.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_revolve.py"        -Out "$S\tests\selftest_revolve.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_sphere.py"         -Out "$S\tests\selftest_sphere.scdocx"         -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_imprint.py"        -Out "$S\tests\selftest_imprint.scdocx"        -Verify
 ```
 
-All twelve must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All thirteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -242,6 +244,7 @@ All twelve must end in `[scdm] status=ok` and print the verify block. Regression
 | `selftest_profile` | 2 bodies: `TrapDuct 20.000 x 10.000 x 20.000` (6 faces) · `EllipDuct 15.000 x 20.000 x 10.000` (3 faces) | trap_inlet/trap_outlet 各 150.00 mm² @ (0,0,0)/(0,0,20) · trap_wall 4 faces (400.00 / 200.00 / 223.61 ×2) · ell_inlet/ell_outlet 各 157.08 mm² @ (40,0,0)/(55,0,0) · ell_wall 726.63 mm² |
 | `selftest_revolve` | 2 bodies: `Frustum 16.000 x 16.000 x 20.000` (3 faces) · `Cone 20.000 x 16.000 x 16.000` (2 faces) | fru_inlet 201.06 mm² @ (0,0,0) · fru_outlet 50.27 mm² @ (0,0,20) · fru_wall 768.91 mm² @ (0,0,10) · cone_inlet 201.06 mm² @ (40,0,0) · cone_wall 541.38 mm² @ (50,0,0) |
 | `selftest_sphere` | 2 bodies: `Ball 10x10x10` (1 face) · `Cavity 20x20x20` (7 faces = 6 planes + spherical cavity) | ball_surface 314.16 mm² @ (0,0,0) · cavity_wall 452.39 mm² @ (60,0,0) |
+| `selftest_imprint` | 2 bodies: `Plate 40x40x10` (7 faces after the split) · `Cutter 10x10x40` | patch 78.54 mm² @ (20,20,0) loops=1 · rest 1521.46 mm² @ (20,20,0) loops=2 |
 
 Run these before blaming a new model script.
 

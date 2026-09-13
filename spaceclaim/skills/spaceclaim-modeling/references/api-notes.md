@@ -604,3 +604,37 @@ SphereBody.Create(Point center, Point onSphere, ExtrudeType, ICommandInfo)
 修法：`scdm_lib._ascii(name)` 先转 ASCII 再格式化；`verify_model.py` 的体名打印已经用它。
 自己写脚本时，任何 `print` 里出现 `body.Name` / 组名都要先过一遍 `_ascii`。
 
+## 17. 按刀具体切分面：刀具体必须传"面"（第 13 个回归用例实测）
+
+目标：在墙面/底面局部"盖章"出一个区域（比如圆形射流入口、喷嘴落点），好单独命名。
+
+```
+SplitFace.ByCutter(目标面选择, 刀具体选择, SplitFaceOptions(), ICommandInfo)
+```
+
+**关键：第二个参数必须是一张面，不能是整个体。**
+
+| 刀具选择 | 结果 |
+|---|---|
+| 整个圆柱体 `Selection.Create(cylinderBody)` | `Success=False`，**什么都没切**（面数不变） |
+| 圆柱的侧面 `Selection.Create(lateralFace)` | ✅ `Success=True`：40×40 的板底 1600 mm² 变成两张 |
+
+切分结果（Plate 40×40×10，r=5 的圆柱穿过底面）：
+
+| 面 | 面积 | 面心 | loops |
+|---|---|---|---|
+| 圆补丁 | 78.54 mm² = π·5² | (20,20,0) | 1 |
+| 其余部分 | 1521.46 mm² = 1600 − 78.54 | (20,20,0) | 2 |
+
+两条可直接用上的经验：
+
+1. **切完的两张面面心相同**，所以 `at` / `in_box` / `point` 这类位置规则区分不了它们；
+   要用**面积**或**边界环数**。`match_faces` 因此新增了 `loops` 键：
+   `{"normal":"z","sign":-1,"loops":1}` 取补丁，`{"loops":2}` 取带内环的那张。
+   `loops` 读的是 `face.Shape.Loops.Count`。
+2. 不知道刀具的哪张面能切时，`scdm_lib.split_face_by_body()` 会依次拿刀具的每张面去试，
+   返回第一张成功的（失败的调用是无害的：`Success=False` 且不改几何）。
+
+`SplitBody.ByCutter(体, 体)` 试过两种参数个数都抛 `ValueError`，没继续深挖——需要切体时
+用已验证的 `split_body_by_plane()`。
+
