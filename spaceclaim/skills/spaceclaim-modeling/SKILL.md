@@ -453,6 +453,7 @@ The runner composes the script, runs the verified command line, and judges succe
 
 ## 4. Failure triage
 
+- **偶发失败先原样重试一次。** 批量跑用例时偶见过一次 `channel_4x4x10` 判失败（大概率是上一个进程还占着 `.scdocx`），隔几秒重跑，数字与基线完全一致。写批处理时给每个用例留一次重试，重试过的那条要标出来。
 - **An empty `/ScriptOutput` log is the signature of a script that died before its first print.** The runner then automatically prints the `Script failed: …` line it finds in `%APPDATA%\SpaceClaim\Log Files\SpaceClaim_<date>_<pid>.log`. Read that line first — it names the real API error.
 - `status=failed reason=…` mentioning the missing sentinel → the script ran but never reached `finish()`.
 - `status=failed reason=… raised an exception` → the traceback is printed above it.
