@@ -102,6 +102,33 @@ name_faces_by_rules(body, [
    `split_face_by_points(face, p1, p2)` 用面上两点定切分线；`split_face_by_line(face, axis, value)` 自动算端点（只对轴对齐的平面面可靠）；`split_body_by_plane(body, axis, value)` 把整个体切成两个（实测 2 个体）。**切完原面对象会失效，必须重新取面。**
 2. **边界条件的"类型"不在 SpaceClaim 里设**。这里只决定"哪些面叫什么名字"；`velocity-inlet` / `pressure-outlet` / `wall` / `symmetry` / `periodic` / `fan` / `porous-jump` / `interface` 这些类型是在 Fluent 或 Mechanical 里赋给同名分区的。名字必须是 ASCII。
 
+## 1c. 常见 CFD 边界条件手册（几何前提 + 写法）
+
+表里的"几何前提"是关键：有些边界条件不是"起个名字"就行，**几何本身得先满足条件**。第三列给出的都是已封装的写法。
+
+| Fluent 里的类型 | 几何前提 | 怎么写 |
+|---|---|---|
+| velocity-inlet / pressure-inlet / mass-flow-inlet | 一个或几个面 | `{"normal":"x","sign":-1}`、`{"point":(x,y,z)}`、`{"nearest":(x,y,z)}` |
+| pressure-outlet / outflow | 一个或几个面 | 同上，`sign` 取反 |
+| wall（普通壁、滑移壁、移动壁） | 剩下的面 | `{"rest":True}`，名字自己起（`wall` / `slip_wall` / `moving_wall`） |
+| **wall + 分区热流**（恒定热流 / 对流 / 绝热混用） | **一张面要切成几段** | 先 `split_face_by_line(bottom, "x", 50.0)`，再用 `{"in_box":(None,50,...)}` 分别命名 `heated_wall` / `insulated_wall` |
+| symmetry | 对称面所在的那张面（几何通常已是半模型） | `{"at":("y",0.0)}` 或 `{"normal":"y","sign":-1}` |
+| axis（2D 轴对称） | 中心线那张面 | `{"at":("y",0.0)}` |
+| **periodic**（平移/旋转周期） | **两侧面形状必须对应** | 先 `faces_match(f1, f2)` 确认对应，再 `name_face_pair("periodic_hot","periodic_cold", f1, f2)` |
+| **interface**（共轭传热 / 流固耦合） | 两个体在**同一位置各有一张面** | `name_interfaces(solid, fluid, "interface")` → 自动配对成 `interface_a` / `interface_b` |
+| **interior / baffle / porous-jump / fan / radiator** | 面必须在**体内部**，而实心体内部本来没有面 | `name_internal_baffle(body, axis="x", value=50.0, name="baffle")` → 自动切开并把两张内表面成对命名 |
+| 多入口 / 多出口 | 每个口一张面 | 多条规则分别命名 `inlet_main` / `inlet_secondary` |
+| 自由液面（VOF） | 气相液相都要建出来 | 用 `separate=True` 造两个体，或在分界高度 `split_body_by_plane` |
+| cell zone（流体域 / 固体域） | **体本身**就是 cell zone | `box(..., name="Fluid")` / `box(..., name="Solid")`；体名会带进 Fluent Meshing，所以也要起好 |
+
+相关函数一句话说明：
+
+- `find_coincident_pairs(body_a, body_b)` —— 找出两个体之间所有重合面（交界面的基础）
+- `name_interfaces(body_a, body_b, prefix)` —— 自动配对命名，返回配对数
+- `name_internal_baffle(body, axis, value, name)` —— 切开 + 成对命名内部面
+- `faces_match(f1, f2)` —— 两张面是否几何对应（周期面/对称面的自检）
+- `name_face_pair(name_a, name_b, f1, f2)` —— 给一对面分别命名
+
 ## 2. Run it
 
 ```powershell
@@ -163,9 +190,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_boundaries.py"     -Out "$S\tests\selftest_boundaries.scdocx"     -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_split.py"          -Out "$S\tests\selftest_split.scdocx"          -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_rotate.py"         -Out "$S\tests\selftest_rotate.scdocx"         -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_pairs.py"          -Out "$S\tests\selftest_pairs.scdocx"          -Verify
 ```
 
-All seven must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All eight must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -176,6 +204,7 @@ All seven must end in `[scdm] status=ok` and print the verify block. Regression 
 | `selftest_boundaries` | 2 bodies: `Channel 100x40x40` · `Pipe 30x12x12` | 7 groups: inlet 1600 mm² @ (0,20,20) · outlet 1600 mm² @ (100,20,20) · symmetry 4000 mm² @ (50,0,20) · wall 3 faces × 4000 mm² · pipe_inlet/pipe_outlet 62.83 mm² @ x=0/30 · pipe_wall 1130.97 + 753.98 mm² |
 | `selftest_split` | 3 bodies: `Channel 100x40x40` (7 faces) · `SplitMe` 20x20x10 · `SplitMe1` 20x20x10 | inlet 1600 mm² @ (0,20,20) · outlet 1600 mm² @ (100,20,20) · heated_wall 2000 mm² @ (25,20,0) · wall 4 faces (4000×3 + 2000 @ (75,20,0)) |
 | `selftest_rotate` | `Bar 35.355 x 35.355 x 10.000` (40x10x10 rotated 45° about Z) · `Tilted 20.000 x 27.321 x 27.321` (20³ rotated 30° about X) | inlet 100.00 mm² @ (24.749,31.820,5) · outlet 100.00 mm² @ (-3.536,3.536,5) · wall 4 faces × 400.00 mm² · top_tilted 400.00 mm² @ (10,105,18.660) · rest_wall 5 faces |
+| `selftest_pairs` | 4 bodies: `Solid 50x40x40` · `Fluid 50x40x40` · `Bar 50x40x40` · `Bar1 50x40x40` (Bar split at x=50) | interface_a/interface_b 各 1600.00 mm² @ (50,20,20) · baffle_a/baffle_b 各 1600.00 mm² @ (50,120,20) |
 
 Run these before blaming a new model script.
 

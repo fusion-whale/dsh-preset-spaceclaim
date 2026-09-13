@@ -862,6 +862,115 @@ def split_body_by_plane(body, axis="x", value=0.0):
 
 
 # ---------------------------------------------------------------------------
+# 成对边界条件：交界面 / 内部挡板 / 周期面
+#
+# 这几类边界条件的难点不在"起名字"，而在**几何前提**：
+#   * 交界面（共轭传热）：两个体必须在同一位置各有一张面，且两张面重合
+#   * 内部挡板 / 多孔跳变 / 风扇面：面必须在**体内部**，而实心体内部本来没有面，
+#     所以要先把体切开
+#   * 周期边界：两侧面的形状/面积必须对应得上
+# 下面这些函数把"找面 + 配对 + 命名"一次做完，并返回数量供脚本自检。
+# ---------------------------------------------------------------------------
+
+def faces_match(face_a, face_b, tol=1e-3):
+    """两张面是否**几何对应**：面积相同、包围盒三个方向的尺寸都相同。
+
+    用来确认周期边界的两侧面确实配得上（位置可以不同，形状必须一致）。
+    """
+    aa = face_area(face_a)
+    ab = face_area(face_b)
+    if abs(aa - ab) > tol * max(1.0, aa):
+        return False
+    la, ha = face_extent(face_a)
+    lb, hb = face_extent(face_b)
+    for k in range(3):
+        if abs((ha[k] - la[k]) - (hb[k] - lb[k])) > tol:
+            return False
+    return True
+
+
+def find_coincident_pairs(body_a, body_b, tol=1e-3):
+    """找出两个体之间所有**重合**的面（面心与面积都吻合），返回 [(face_a, face_b), ...]。
+
+    这就是交界面 / 内部挡板的基础：两个体在同位置各有一张面。
+    """
+    pairs = []
+    for fa in body_a.Faces:
+        ca = face_center(fa)
+        aa = face_area(fa)
+        for fb in body_b.Faces:
+            cb = face_center(fb)
+            if abs(ca[0] - cb[0]) > tol or abs(ca[1] - cb[1]) > tol or abs(ca[2] - cb[2]) > tol:
+                continue
+            ab = face_area(fb)
+            if abs(aa - ab) > tol * max(1.0, aa):
+                continue
+            pairs.append((fa, fb))
+    return pairs
+
+
+def name_face_pair(name_a, name_b, face_a, face_b):
+    """给一对面分别命名（周期 / 交界面 / 内部挡板都要成对命名）。"""
+    name_faces(name_a, [face_a])
+    name_faces(name_b, [face_b])
+    return (name_a, name_b)
+
+
+def name_interfaces(body_a, body_b, prefix="interface", tol=1e-3):
+    """把两个体之间所有重合面自动配对命名：<prefix>_a / <prefix>_b（多对时带 _1 _2）。
+
+    典型场景：流体域与固体域的共轭传热交界面。返回配对数。
+    """
+    pairs = find_coincident_pairs(body_a, body_b, tol)
+    for idx in range(len(pairs)):
+        fa, fb = pairs[idx]
+        tag = "" if len(pairs) == 1 else "_%d" % (idx + 1)
+        name_faces("%s_a%s" % (prefix, tag), [fa])
+        name_faces("%s_b%s" % (prefix, tag), [fb])
+    return len(pairs)
+
+
+def name_internal_baffle(body, axis="x", value=0.0, name="baffle", tol=1e-3):
+    """把一个体沿 axis=value 切开，并把切出来的两张内部重合面成对命名。
+
+    对应内部挡板 / 多孔跳变 / 风扇面这类"体内部的面"——实心体内部本来没有面，
+    必须先切分。返回被命名的两张面 (face_a, face_b)。
+
+    扫描时限定在切分前那个体的包围盒内，避免误抓同一坐标上别的体的面。
+    """
+    a_i = _axis_index(axis)
+    lo, hi = body_extent(body, axis)
+    if value < lo - tol or value > hi + tol:
+        raise ValueError("name_internal_baffle: %s=%.3f is outside the body range (%.3f ~ %.3f)"
+                         % (axis, value, lo, hi))
+    box_lo = list(body_extent(body, 0)) + []
+    ext0 = body_extent(body, "x")
+    ext1 = body_extent(body, "y")
+    ext2 = body_extent(body, "z")
+    lo3 = (ext0[0], ext1[0], ext2[0])
+    hi3 = (ext0[1], ext1[1], ext2[1])
+
+    split_body_by_plane(body, axis=axis, value=value)
+
+    found = []
+    for b in GetRootPart().Bodies:
+        for f in b.Faces:
+            c = face_center(f)
+            if abs(c[a_i] - value) > tol:
+                continue
+            inside = True
+            for k in range(3):
+                if c[k] < lo3[k] - tol or c[k] > hi3[k] + tol:
+                    inside = False
+                    break
+            if inside:
+                found.append(f)
+    if len(found) != 2:
+        raise RuntimeError("name_internal_baffle: expected 2 coincident faces, found %d" % len(found))
+    return name_face_pair(name + "_a", name + "_b", found[0], found[1])
+
+
+# ---------------------------------------------------------------------------
 # 保存与输出
 # ---------------------------------------------------------------------------
 

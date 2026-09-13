@@ -340,3 +340,42 @@ Move.Rotate(selection, Line.Create(Point.Create(...), Direction.Create(nx,ny,nz)
 `scdm_lib.faces_by_normal()` 现在也接受任意向量方向 `(nx,ny,nz)`，用于斜几何的法向匹配；
 `match_faces` 的 `{"normal": (nx,ny,nz)}` 一直支持这一点。
 
+## 11. 成对边界条件（第 8 个回归用例实测）
+
+三类边界条件的难点不在命名，而在**几何前提**；`scdm_lib` 里对应的函数一次做完。
+
+### 11.1 交界面（共轭传热 / 流固耦合）
+
+前提：两个体在**同一位置各有一张面**。用 `separate=True` 让相邻的两个体保持独立
+（默认重叠/相接会被并集，见 §7.1）。
+
+实测：`Solid 50x40x40 (x 0~50)` + `Fluid 50x40x40 (x 50~100, separate=True)`
+→ `find_coincident_pairs(solid, fluid)` 返回 **1 对**；两张面都是中心 (50,20,20)、面积 1600 mm²。
+`name_interfaces(solid, fluid, "interface")` → `interface_a` / `interface_b` 各 1 面。
+
+配对判据：面心三轴坐标吻合 + 面积相对误差在容差内。
+
+### 11.2 内部面（baffle / porous-jump / fan / radiator）
+
+前提：**面必须存在于体内部**，而实心体内部本来没有面——必须先切开。
+`name_internal_baffle(body, axis, value, name)` = `split_body_by_plane` + 找那两张重合面 + 成对命名。
+
+实测：`Bar 100x40x40` 在 x=50 切开 → 体数 3→4，两张内表面都是中心 (50,120,20)、面积 1600 mm²，
+命名为 `baffle_a` / `baffle_b`。
+
+扫描时**限定在切分前那个体的包围盒内**，否则同一坐标上别的体的面会被误抓
+（本例里 Solid/Fluid 的交界面也在 x=50，靠包围盒排除掉了）。
+
+### 11.3 周期面（periodic）
+
+前提：两侧面**形状必须对应**。`faces_match(f1, f2)` 比对面积与包围盒三向尺寸
+（位置允许不同）；实测 x=0 与 x=100 的两张 1600 mm² 面 → `True`。
+
+配对命名用 `name_face_pair("periodic_hot", "periodic_cold", f1, f2)`。
+
+### 11.4 体名即 cell zone
+
+SpaceClaim 里"一个体"在 Fluent Meshing 里通常就是一个 cell zone，所以
+`box(..., name="Fluid")` / `box(..., name="Solid")` 里的体名也要按 cell zone 命名规范起
+（这条是工作流惯例，本仓库未做端到端验证）。
+
