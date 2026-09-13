@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `stepped_cone`, `extrude_circle`, `move`, `face_center`, `face_area`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `name_faces`, `name_boundaries`, `save_model`, `group_summary`, `finish`.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `stepped_cone`, `extrude_circle`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `name_faces`, `name_faces_by_rules`, `name_boundaries`, `save_model`, `group_summary`, `finish`.
 
 Shape helpers, all verified on this machine:
 
@@ -127,6 +127,8 @@ The runner composes the script, runs the verified command line, and judges succe
 | Named selection naming | `NamedSelection.Create(sel, Selection.Empty(), PartLocation.Root, None)` takes **no name**; rename afterwards via `grp.Name = name` (fallback `NamedSelection.Rename(old, new)`). The default name is localised and may be non-ASCII. |
 | Face geometry | Scripting faces are `DesignFace` wrappers. `face.Edges` fails with `'DesignEdge' object has no attribute 'StartPoint'`; use **`face.Shape.Edges` / `face.Shape.Area`**. |
 | Printing | Printing a non-ASCII .NET string can raise `UnicodeEncodeError` and abort the script. Keep `print()` ASCII; `finish()` prints the sentinel before any summary so a print failure cannot fake a build failure. |
+| Exceptions | **An exception whose message carries non-ASCII text aborts the whole script with no traceback** — the host log shows an empty `Script failed:`. Every `raise` message in `scdm_lib.py` is ASCII on purpose; keep it that way. Chinese belongs in docstrings and comments only. |
+| Rotation | `Move.Rotate(selection, Line, angle, MoveOptions())` takes **radians** — passing `45` gives a 58.3° rotation (45 rad mod 2π), which looks plausible and is silently wrong. `scdm_lib.rotate(body, degrees, axis, center)` takes degrees and converts; build the axis with `Line.Create(Point, Direction)`. |
 | Cylinder | `CylinderBody.Create(center, start, end)` = centre of the defining circle, centre of the **far base**, a point on that far base's circle. `start` sets axis + length; `end` sets the radius. |
 | Result members | `BlockBodyResult`/`SphereResult` have `CreatedBody`; **`CylinderBodyResult` only has `CreatedBodies`**. `scdm_lib.cylinder()` handles both. |
 | Curved faces | A closed circular edge's `StartPoint`/`EndPoint` return the **circle centre**, so measuring a curved face from endpoints alone collapses its extents. `scdm_lib` samples edges with `GetPolyline(PolylineOptions())` instead. |
@@ -160,9 +162,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_solids.py"         -Out "$S\tests\selftest_solids.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_boundaries.py"     -Out "$S\tests\selftest_boundaries.scdocx"     -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_split.py"          -Out "$S\tests\selftest_split.scdocx"          -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_rotate.py"         -Out "$S\tests\selftest_rotate.scdocx"         -Verify
 ```
 
-All six must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All seven must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -172,6 +175,7 @@ All six must end in `[scdm] status=ok` and print the verify block. Regression ba
 | `selftest_solids` | 4 bodies: `Plate 20x20x4` (7 faces) · `Pipe 30x12x12` (4 faces) · `Cube 5x5x5` · `Sep 6x6x6` | inlet 62.83 mm² @ x=40 · outlet 62.83 mm² @ x=70 · wall 2 faces (outer 1130.97 + bore 753.98 mm²) |
 | `selftest_boundaries` | 2 bodies: `Channel 100x40x40` · `Pipe 30x12x12` | 7 groups: inlet 1600 mm² @ (0,20,20) · outlet 1600 mm² @ (100,20,20) · symmetry 4000 mm² @ (50,0,20) · wall 3 faces × 4000 mm² · pipe_inlet/pipe_outlet 62.83 mm² @ x=0/30 · pipe_wall 1130.97 + 753.98 mm² |
 | `selftest_split` | 3 bodies: `Channel 100x40x40` (7 faces) · `SplitMe` 20x20x10 · `SplitMe1` 20x20x10 | inlet 1600 mm² @ (0,20,20) · outlet 1600 mm² @ (100,20,20) · heated_wall 2000 mm² @ (25,20,0) · wall 4 faces (4000×3 + 2000 @ (75,20,0)) |
+| `selftest_rotate` | `Bar 35.355 x 35.355 x 10.000` (40x10x10 rotated 45° about Z) · `Tilted 20.000 x 27.321 x 27.321` (20³ rotated 30° about X) | inlet 100.00 mm² @ (24.749,31.820,5) · outlet 100.00 mm² @ (-3.536,3.536,5) · wall 4 faces × 400.00 mm² · top_tilted 400.00 mm² @ (10,105,18.660) · rest_wall 5 faces |
 
 Run these before blaming a new model script.
 

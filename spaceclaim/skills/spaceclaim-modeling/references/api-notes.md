@@ -305,3 +305,38 @@ type(face.Shape.Geometry).__name__   # 'Plane' / 'Cylinder' / 'Cone' / 'Sphere' 
 - `SplitFace` 还有 `ByCutter`（用刀具体面）、`ByParametric`、`ByCurves`，`SplitBody` 还有
   `ByCutter(sel, cutterSelection, …)`；都没用上，需要时再试。
 
+## 10. 旋转与"异常信息陷阱"（第 7 个回归用例实测）
+
+### 10.1 Move.Rotate 的角度是弧度
+
+```
+Move.Rotate(selection, Line.Create(Point.Create(...), Direction.Create(nx,ny,nz)),
+            angle, MoveOptions())
+```
+
+**`angle` 是弧度，不是度。** 实测同一个 40×10×10 的长条绕 Z 轴旋转：
+
+| 传入 | 实际旋转 | 包围盒 |
+|---|---|---|
+| `0.7853981633974483`（45° 的弧度） | 45° | **35.355 × 35.355 × 10.000** ✓ |
+| `45.0`（当成度数传） | 58.3°（45 rad 对 2π 取模） | 29.522 × 39.289 × 10.000 ✗ |
+
+第二种**看起来也像个合理结果**，不对比包围盒根本发现不了。`scdm_lib.rotate()` 对外用度，
+内部 `math.radians` 转换。
+
+### 10.2 异常信息里不能有非 ASCII —— 会让宿主静默中止整个脚本
+
+实测：`faces_by_normal(body, (0.7, 0.7, 0.0))` 触发了 `_axis_index` 的 `ValueError`，
+而那行错误信息里有中文。结果**不是**被 `try/except` 接住，而是：
+
+- 脚本立刻停止，后面的语句一条都不执行
+- `/ScriptOutput` 日志里没有任何 traceback
+- SpaceClaim 自己的日志里只有一行空的 `Script failed:`
+
+对照实验：同样机制下，ASCII 信息（`move(): body is None`）能正常出现在应用日志里，
+说明问题出在**非 ASCII 的异常信息**本身，不是异常类型。
+所以库里所有 `raise` 的信息都改成了纯 ASCII（中文只保留在 docstring 和注释里）。
+
+`scdm_lib.faces_by_normal()` 现在也接受任意向量方向 `(nx,ny,nz)`，用于斜几何的法向匹配；
+`match_faces` 的 `{"normal": (nx,ny,nz)}` 一直支持这一点。
+

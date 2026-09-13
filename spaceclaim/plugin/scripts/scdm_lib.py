@@ -58,7 +58,7 @@ def _extrude_type(cut, separate=False):
     所以这里返回 None 时，调用方要换成一个少传参数的重载。
     """
     if cut and separate:
-        raise ValueError("cut 和 separate 不能同时为 True")
+        raise ValueError("cut and separate cannot both be True")
     if cut:
         return ExtrudeType.Cut
     if separate:
@@ -176,6 +176,21 @@ def move(body, dx=0.0, dy=0.0, dz=0.0):
     return body
 
 
+def rotate(body, angle_deg, axis="z", center=(0.0, 0.0, 0.0)):
+    """绕"过 center、方向为 axis"的直线旋转实体。对外角度单位是**度**，右手定则。
+
+    实测要点：底层 `Move.Rotate` 的角度参数是**弧度**——传 45（当成度）会得到
+    58.3 度的结果（45 rad 对 2*pi 取模），所以这里内部做换算。
+    实测：40x10x10 的长条绕 Z 轴转 45 度 → 包围盒 35.355 x 35.355 x 10.000。
+    """
+    import math
+    d = _dir_vector(axis)
+    line = Line.Create(Point.Create(MM(center[0]), MM(center[1]), MM(center[2])),
+                       Direction.Create(d[0], d[1], d[2]))
+    Move.Rotate(Selection.Create(body), line, math.radians(angle_deg), MoveOptions())
+    return body
+
+
 def tube(outer_radius, inner_radius, height, origin=(0.0, 0.0, 0.0), axis="z",
          name="Pipe", overshoot=1.0):
     """空心圆管：外圆柱 + 内圆柱布尔减。
@@ -184,7 +199,7 @@ def tube(outer_radius, inner_radius, height, origin=(0.0, 0.0, 0.0), axis="z",
     返回外圆柱那个体（布尔减之后它就是管体本身）。
     """
     if inner_radius >= outer_radius:
-        raise ValueError("tube(): inner_radius 必须小于 outer_radius")
+        raise ValueError("tube(): inner_radius must be smaller than outer_radius")
     a = axis.lower()
     outer = cylinder(outer_radius, height, origin=origin, axis=a, name=name)
     x0, y0, z0 = origin
@@ -208,7 +223,7 @@ def stepped_cone(radius1, radius2, height, segments=8, origin=(0.0, 0.0, 0.0),
     """
     segs = int(segments)
     if segs < 1:
-        raise ValueError("stepped_cone(): segments 至少为 1")
+        raise ValueError("stepped_cone(): segments must be at least 1")
     a = axis.lower()
     x0, y0, z0 = origin
     step = float(height) / segs
@@ -260,10 +275,10 @@ def extrude_circle(radius, height, center2d=(0.0, 0.0), name="Body", cut=False):
     ViewHelper.SetViewMode(InteractionMode.Solid, None)
     bodies = list(GetRootPart().Bodies)
     if not bodies:
-        raise RuntimeError("extrude_circle(): 草图没有生成可拉伸的面")
+        raise RuntimeError("extrude_circle(): the sketch produced no face to extrude")
     faces = list(bodies[len(bodies) - 1].Faces)
     if not faces:
-        raise RuntimeError("extrude_circle(): 草图体上没有面")
+        raise RuntimeError("extrude_circle(): the sketch body has no face")
     opts = ExtrudeFaceOptions()
     opts.ExtrudeType = ExtrudeType.Cut if cut else ExtrudeType.Add
     res = ExtrudeFaces.Execute(Selection.Create(faces[0]), MM(height), opts)
@@ -288,7 +303,7 @@ def _axis_index(axis):
         return 1
     if a in ("z", "2"):
         return 2
-    raise ValueError("axis 只能是 'x' / 'y' / 'z'，收到: " + str(axis))
+    raise ValueError("axis must be 'x'/'y'/'z'; got: " + repr(axis))
 
 
 def _shape_of(obj):
@@ -438,13 +453,13 @@ def name_faces(name, face_list):
     """
     face_list = list(face_list)
     if not face_list:
-        raise ValueError("命名选择 '" + str(name) + "' 没有任何面")
+        raise ValueError("named selection '" + str(name) + "' has no faces")
     res = NamedSelection.Create(Selection.Create(face_list),
                                 Selection.Empty(),
                                 PartLocation.Root,
                                 None)
     if not res.Success:
-        raise RuntimeError("命名选择创建失败: " + str(name))
+        raise RuntimeError("failed to create named selection: " + str(name))
     grp = res.CreatedNamedSelection
     try:
         grp.Name = name
@@ -545,12 +560,19 @@ def _dir_vector(axis):
 
 
 def faces_by_normal(body, axis="z", sign=1, tol=0.99):
-    """法向朝向某轴的面。sign=+1 朝正向，-1 朝负向。
+    """法向朝向某个方向的面。
 
-    对应"朝上的面""底面""朝向 +X 的那一面"。只有平面面有法向，
-    圆柱侧面等一律不入选（要圆柱面用 faces_by_kind(body, "cylinder")）。
+    axis 可以是 "x"/"y"/"z"，也可以是任意单位方向 (nx,ny,nz)——后者用来匹配
+    **斜几何**（例如绕 Z 轴转 45 度后，管口法向是 (0.7071, 0.7071, 0)）。
+    sign=+1 朝该方向，-1 朝反方向。
+
+    只有平面面有法向；圆柱侧面等一律不入选（要圆柱面用 faces_by_kind(body, "cylinder")）。
     """
-    d = _dir_vector(axis)
+    d = axis if isinstance(axis, (tuple, list)) else _dir_vector(axis)
+    L = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) ** 0.5
+    if L <= 0.0:
+        raise ValueError("faces_by_normal: direction must be non-zero")
+    d = (d[0] / L, d[1] / L, d[2] / L)
     out = []
     for f in body.Faces:
         n = face_normal(f)
@@ -806,7 +828,7 @@ def split_face_by_line(face, axis="x", value=0.0, tol=1e-6):
     a_i = _axis_index(axis)
     lo, hi = face_extent(face)
     if value < lo[a_i] - tol or value > hi[a_i] + tol:
-        raise ValueError("split_face_by_line: %s=%.3f 不在这张面的范围内 (%.3f ~ %.3f)"
+        raise ValueError("split_face_by_line: %s=%.3f is outside the face range (%.3f ~ %.3f)"
                          % (axis, value, lo[a_i], hi[a_i]))
     others = [i for i in range(3) if i != a_i]
     others.sort(key=lambda i: hi[i] - lo[i], reverse=True)
