@@ -379,3 +379,46 @@ SpaceClaim 里"一个体"在 Fluent Meshing 里通常就是一个 cell zone，�
 `box(..., name="Fluid")` / `box(..., name="Solid")` 里的体名也要按 cell zone 命名规范起
 （这条是工作流惯例，本仓库未做端到端验证）。
 
+## 12. 草图工具的限制与非圆形截面（第 9 个回归用例实测）
+
+### 12.1 硬限制：文档里一旦有实体，新建草图就崩
+
+| 场景 | 结果 |
+|---|---|
+| 空文档 → `SketchPolygon.Create` → Solid → 拉伸 | ✅ 正常 |
+| 空文档 → `box()` → `SketchPolygon.Create` | ❌ **崩**（`SketchPolygon.Create` 处抛 .NET 空引用，脚本直接中止） |
+| 两个**重叠**的草图画在同一位置 → Solid | 只得到 **1 张面**（合并了） |
+| 两个**不重叠**的草图 → Solid | ✅ **1 个体带 2 张面**，各自独立 |
+| 逐张拉伸这些面 | ✅ 两次拉伸都成功，各自成体 |
+
+所以可靠用法是：**先把所有草图一次画完（互不重叠，拉开间距），切一次 Solid，再逐个拉伸**。
+这就是 `scdm_lib.polygon_prisms()` 的由来，`polygon_prism()` 只是它的单元素包装。
+`box` / `cylinder` / `tube` / `stepped_cone` 不走草图，**不受这个限制**。
+
+### 12.2 ExtrudeFacesResult 不可靠，改用"体集合之差"
+
+拉伸一张面时，`ExtrudeFacesResult.CreatedBodies[0]` 在多面表面体的情况下可能给回一个
+**DesignFace**（实测报 `'DesignFace' object has no attribute 'Faces'`）。
+`scdm_lib._extrude_face()` 因此不看结果对象，而是比较拉伸前后的体集合：
+
+- 出现新体 → 多轮廓情形（草图体留着剩下的面，新体是拉出来的棱柱）
+- 没有新体 → 单轮廓情形（草图体自己变成了实体），此时用 `DesignFace.Parent` 反查
+
+### 12.3 非圆形截面的实测数值
+
+`polygon_prisms` 里 radius 是**外接圆半径**（`SketchPolygon.Create` 第二个点定义顶点）：
+
+| 截面 | 端面面积 | 包围盒（沿轴向长度已知时） |
+|---|---|---|
+| 正六边形 R=5 | 64.95 mm² = (3√3/2)R² | 10.000 × 8.660 |
+| 正八边形 R=6 | 101.82 mm² = 2√2·R² | 12.000 × 12.000 |
+
+八边形的顶点在 0°/45°/…，两个方向的包围盒都是 2R（不是 2R·cos22.5°）；侧面每片面积
+= 边长 × 长度 = 2R·sin(22.5°) × L（R=6, L=15 时 68.88 mm²）。
+
+### 12.4 草图平面的法向是 Y
+
+草图拉出来的棱柱先沿 **+Y**。`polygon_prisms` 随后用 `rotate` 摆到目标轴向：
+`axis="z"` → 绕 X 转 +90°；`axis="x"` → 绕 Z 转 −90°；`axis="y"` → 不转。
+最后用 `_anchor_prism()` 把底面中心对齐到 origin（与 `cylinder()` 的约定一致）。
+

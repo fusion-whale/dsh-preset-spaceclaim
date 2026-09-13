@@ -258,6 +258,198 @@ def stepped_cone(radius1, radius2, height, segments=8, origin=(0.0, 0.0, 0.0),
     return body
 
 
+def _body_key(body):
+    """体的稳定标识（Moniker 字符串；重复枚举可能给出不同的包装对象）。"""
+    try:
+        return str(body.Moniker)
+    except:
+        return str(id(body))
+
+
+def _sketch_region_body(before_keys):
+    """找出 Solid 模式之后**新出现**的那个体（即闭合草图轮廓变成的面）。
+
+    不能用"根零件里最后一个体"：文档里已经有别的体时会抓错对象——
+    实测这样第二个草图会让 SpaceClaim 直接抛空引用。
+    """
+    for b in GetRootPart().Bodies:
+        if _body_key(b) not in before_keys:
+            return b
+    return None
+
+
+def _extrude_face(face, height, cut=False):
+    """把**一张面**拉伸成体，返回结果体。
+
+    用"拉伸前后体集合之差"判定，不依赖 ExtrudeFacesResult（它给回的成员在多面
+    表面体的情况下不可靠，实测会拿到 DesignFace）。没有新体出现时，说明这张面
+    所在的体自己变成了实体，于是用 face.Parent 反查。
+    """
+    if face is None:
+        raise RuntimeError("_extrude_face: no face to extrude")
+    before = {}
+    for b in GetRootPart().Bodies:
+        before[_body_key(b)] = 1
+    opts = ExtrudeFaceOptions()
+    opts.ExtrudeType = ExtrudeType.Cut if cut else ExtrudeType.Add
+    ExtrudeFaces.Execute(Selection.Create(face), MM(height), opts)
+    new_body = _sketch_region_body(before)
+    if new_body is not None:
+        return new_body
+    try:
+        parent = face.Parent
+        if parent is not None:
+            return parent
+    except:
+        pass
+    raise RuntimeError("_extrude_face: could not determine the extruded body")
+
+
+def _extrude_sketch_body(sketch_body, height, cut=False):
+    """把草图轮廓那张面拉伸成体，返回结果**体**。
+
+    不要用 ExtrudeFacesResult.CreatedBodies 取结果：草图体上有多张面时，
+    它可能给回一个 DesignFace（实测报 `'DesignFace' object has no attribute 'Faces'`）。
+    这里用"拉伸前后体集合之差"来判定：
+
+      * 出现新体  -> 多轮廓情形（草图体留着剩下的面，新体是拉出来的棱柱）
+      * 没有新体  -> 单轮廓情形（草图体自己变成了实体）
+    """
+    if sketch_body is None:
+        raise RuntimeError("_extrude_sketch_body: no sketch region body")
+    faces = list(sketch_body.Faces)
+    if not faces:
+        raise RuntimeError("_extrude_sketch_body: the sketch body has no face")
+    before = {}
+    for b in GetRootPart().Bodies:
+        before[_body_key(b)] = 1
+    opts = ExtrudeFaceOptions()
+    opts.ExtrudeType = ExtrudeType.Cut if cut else ExtrudeType.Add
+    ExtrudeFaces.Execute(Selection.Create(faces[0]), MM(height), opts)
+    new_body = _sketch_region_body(before)
+    if new_body is not None:
+        return new_body
+    return sketch_body
+
+
+def _anchor_prism(body, axis, origin):
+    """把棱柱摆正：沿 axis 的底面落在 origin 的该轴坐标上，另两向按**中心**对齐 origin。
+
+    与 cylinder() 的约定一致（origin 是底面中心），而不是 box() 的"最小角点"。
+    """
+    i = _axis_index(axis)
+    ext = [body_extent(body, k) for k in range(3)]
+    d = [0.0, 0.0, 0.0]
+    d[i] = origin[i] - ext[i][0]
+    for k in range(3):
+        if k != i:
+            d[k] = origin[k] - (ext[k][0] + ext[k][1]) / 2.0
+    return move(body, d[0], d[1], d[2])
+
+
+def polygon_prism(sides, radius, height, origin=(0.0, 0.0, 0.0), axis="z",
+                  name="Body", rotation_deg=0.0):
+    """正多边形棱柱（单个）。内部走 polygon_prisms，只是包了一层。
+
+    注意：**必须在文档还没有任何实体时调用**（见 polygon_prisms 的说明）。
+    """
+    return polygon_prisms([{
+        "sides": sides, "radius": radius, "height": height,
+        "origin": origin, "axis": axis, "name": name,
+        "rotation_deg": rotation_deg,
+    }])[0]
+
+
+def polygon_prisms(profiles):
+    """一次建多个正多边形棱柱——非圆形截面的管道（六边形、八边形……）。
+
+    profiles 里每个元素是 dict：
+        sides        边数（>=3）
+        radius       外接圆半径 mm（草图第二点定义的是顶点）
+        height       长度 mm
+        axis         "x"/"y"/"z"（棱柱轴向）
+        origin       底面中心（与 cylinder() 约定一致）
+        name         体名
+        rotation_deg 绕自身轴额外旋转的角度（可选）
+
+    为什么必须是批量接口（这几条都是实测得出的）：
+      * **文档里一旦有实体，再新建草图就会让 SpaceClaim 抛空引用**（脚本直接中止）。
+        所以所有草图必须在任何实体存在之前一次画完。
+      * 多个**互不重叠**的草图在 Solid 模式下会各自成为一张面（一个表面体带 N 张面）；
+        重叠的草图会合并成一张，所以这里自动给每个草图拉开间距。
+      * 每拉伸一张面，草图体上剩下的面仍然可用，因此可以逐个拉伸。
+
+    实测：六边形 r=5 h=20 沿 Z + 八边形 r=6 h=15 沿 X → 2 个体，
+    分别是 8 面 (10.000 x 8.660 x 20.000) 与 10 面 (15.000 x 12.000 x 11.086)。
+    """
+    ensure_document()
+    existing = GetRootPart().Bodies.Count
+    if existing:
+        raise RuntimeError(
+            "polygon_prisms: the document already has %d body/bodies. Sketch-based profiles "
+            "must be created before any solid exists (SpaceClaim 2022 R1 crashes on a new "
+            "sketch once a solid is present). Build the polygon ducts first, then add "
+            "box/cylinder/tube bodies." % existing)
+    if not profiles:
+        return []
+
+    spacing = 10.0
+    for p in profiles:
+        need = float(p.get("radius", 1.0)) * 4.0
+        if need > spacing:
+            spacing = need
+    centers = []
+    for i in range(len(profiles)):
+        p = profiles[i]
+        r = float(p.get("radius", 1.0))
+        n = int(p.get("sides", 6))
+        if n < 3:
+            raise ValueError("polygon_prisms: sides must be at least 3")
+        cx = i * spacing
+        SketchPolygon.Create(Point.Create(MM(cx), MM(0), MM(0)),
+                             Point.Create(MM(cx + r), MM(0), MM(0)),
+                             False, n)
+        centers.append(cx)
+
+    ViewHelper.SetViewMode(InteractionMode.Solid, None)
+    sketch_body = _sketch_region_body({})
+    if sketch_body is None:
+        raise RuntimeError("polygon_prisms: the sketches did not produce a region body")
+
+    out = []
+    for i in range(len(profiles)):
+        p = profiles[i]
+        target = None
+        for f in list(sketch_body.Faces):
+            if abs(face_center(f)[0] - centers[i]) <= 1e-3:
+                target = f
+                break
+        if target is None:
+            raise RuntimeError("polygon_prisms: sketch face %d not found" % i)
+        body = _extrude_face(target, float(p.get("height", 10.0)))
+        if body is None:
+            raise RuntimeError("polygon_prisms: extrude produced no body for profile %d" % i)
+        a = str(p.get("axis", "z")).lower()
+        if a == "z":
+            rotate(body, 90.0, axis="x")
+        elif a == "x":
+            rotate(body, -90.0, axis="z")
+        elif a != "y":
+            raise ValueError("polygon_prisms: axis must be 'x'/'y'/'z'")
+        rd = float(p.get("rotation_deg", 0.0))
+        if rd:
+            rotate(body, rd, axis=a)
+        _anchor_prism(body, a, tuple(p.get("origin", (0.0, 0.0, 0.0))))
+        nm = p.get("name")
+        if nm:
+            try:
+                body.Name = nm
+            except:
+                pass
+        out.append(body)
+    return out
+
+
 def extrude_circle(radius, height, center2d=(0.0, 0.0), name="Body", cut=False):
     """用“草图圆 -> 拉伸”造一个实体圆（走 草图 -> Solid 模式 -> ExtrudeFaces）。
 
@@ -271,18 +463,15 @@ def extrude_circle(radius, height, center2d=(0.0, 0.0), name="Body", cut=False):
         多条平行草图的处理不可靠（实测两个圆最后只生成一个面）。
     """
     ensure_document()
+    before = {}
+    for b in GetRootPart().Bodies:
+        before[_body_key(b)] = 1
     SketchCircle.Create(Point2D.Create(MM(center2d[0]), MM(center2d[1])), MM(radius))
     ViewHelper.SetViewMode(InteractionMode.Solid, None)
-    bodies = list(GetRootPart().Bodies)
-    if not bodies:
-        raise RuntimeError("extrude_circle(): the sketch produced no face to extrude")
-    faces = list(bodies[len(bodies) - 1].Faces)
-    if not faces:
-        raise RuntimeError("extrude_circle(): the sketch body has no face")
-    opts = ExtrudeFaceOptions()
-    opts.ExtrudeType = ExtrudeType.Cut if cut else ExtrudeType.Add
-    res = ExtrudeFaces.Execute(Selection.Create(faces[0]), MM(height), opts)
-    body = _created_body(res)
+    sketch_body = _sketch_region_body(before)
+    if sketch_body is None:
+        raise RuntimeError("extrude_circle(): the sketch produced no new body")
+    body = _extrude_sketch_body(sketch_body, height, cut)
     if name and not cut and body is not None:
         try:
             body.Name = name

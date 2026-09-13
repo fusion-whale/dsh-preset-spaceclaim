@@ -31,7 +31,19 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `stepped_cone`, `extrude_circle`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `name_faces`, `name_faces_by_rules`, `name_boundaries`, `save_model`, `group_summary`, `finish`.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `stepped_cone`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`.
+
+**Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
+
+```python
+ducts = polygon_prisms([
+    {"sides": 6, "radius": 5.0, "height": 20.0, "axis": "z", "origin": (0,0,0),   "name": "HexDuct"},
+    {"sides": 8, "radius": 6.0, "height": 15.0, "axis": "x", "origin": (40,0,0),  "name": "OctDuct"},
+])
+# 之后照常加 box / cylinder / tube 等非草图体
+```
+
+`polygon_prisms` 会自动把各草图拉开间距（重叠的草图会合并成一张面）。`box` / `cylinder` / `tube` / `stepped_cone` 不走草图，**不受这个限制**，可以随时加。
 
 Shape helpers, all verified on this machine:
 
@@ -191,9 +203,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_split.py"          -Out "$S\tests\selftest_split.scdocx"          -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_rotate.py"         -Out "$S\tests\selftest_rotate.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_pairs.py"          -Out "$S\tests\selftest_pairs.scdocx"          -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_polygon.py"        -Out "$S\tests\selftest_polygon.scdocx"        -Verify
 ```
 
-All eight must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All nine must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -205,6 +218,7 @@ All eight must end in `[scdm] status=ok` and print the verify block. Regression 
 | `selftest_split` | 3 bodies: `Channel 100x40x40` (7 faces) · `SplitMe` 20x20x10 · `SplitMe1` 20x20x10 | inlet 1600 mm² @ (0,20,20) · outlet 1600 mm² @ (100,20,20) · heated_wall 2000 mm² @ (25,20,0) · wall 4 faces (4000×3 + 2000 @ (75,20,0)) |
 | `selftest_rotate` | `Bar 35.355 x 35.355 x 10.000` (40x10x10 rotated 45° about Z) · `Tilted 20.000 x 27.321 x 27.321` (20³ rotated 30° about X) | inlet 100.00 mm² @ (24.749,31.820,5) · outlet 100.00 mm² @ (-3.536,3.536,5) · wall 4 faces × 400.00 mm² · top_tilted 400.00 mm² @ (10,105,18.660) · rest_wall 5 faces |
 | `selftest_pairs` | 4 bodies: `Solid 50x40x40` · `Fluid 50x40x40` · `Bar 50x40x40` · `Bar1 50x40x40` (Bar split at x=50) | interface_a/interface_b 各 1600.00 mm² @ (50,20,20) · baffle_a/baffle_b 各 1600.00 mm² @ (50,120,20) |
+| `selftest_polygon` | 3 bodies: `HexDuct 10.000 x 8.660 x 20.000` (8 faces) · `OctDuct 15.000 x 12.000 x 12.000` (10 faces) · `Extra 10x10x10` | hex_inlet/hex_outlet 各 64.95 mm² @ (0,0,0)/(0,0,20) · hex_wall 6 faces × 100.00 mm² · oct_inlet/oct_outlet 各 101.82 mm² @ (40,0,0)/(55,0,0) · oct_wall 8 faces × 68.88 mm² |
 
 Run these before blaming a new model script.
 
