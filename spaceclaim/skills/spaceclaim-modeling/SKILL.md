@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e and `shell` in §1f.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -283,6 +283,55 @@ shell(solid, 2.0, outward=True)                          # 原表面当内壁、
 1. **`thickness` 必须 > 0**（传 0 底层直接抛错），而且**不能超过最小尺寸的一半**——20mm 立方体给 11 就失败。失败抛的是**中文** StandardError，库统一转成 ASCII 的 `RuntimeError`，并且按几何指纹确认"体确实没被动过"。
 2. **先抽壳、后命名。** 命名选择会**跟着几何走**，但去向不确定：实测对已经命名过的体做"删掉顶面 + 抽壳"，`pre_outlet` 被**重映射到新的顶面环**（144 mm²）；而换成正偏移（`outward`）时同一组会**整组消失**。所以别指望抽壳之后旧的命名还有意义。
 
+## 1g. 阵列 / 镜像（管束、针翅、叶片排）
+
+```python
+pilots = array_linear(seed, 4, 20.0, axis="x", name="Pin")            # 一维：4 个，间距 20
+fins   = array_linear(seed, 3, 20.0, axis="x",
+                      count2=2, pitch2=25.0, axis2="y", name="Fin")   # 二维：3x2
+blades = array_circular(seed, 6, axis="z", center=(0, 0, 0), name="Blade")  # 整圈 6 个
+row    = array_circular(seed, 5, axis="z", center=(0, 0, 0),
+                        angle_deg=90.0, name="Row")                   # 90 度内 5 个（含首尾）
+full   = mirror(half, faces_by_normal(half, "x", -1)[0], merge=True)  # 半模型补成整模型
+```
+
+三个函数都返回**所有实例的列表（含原体）**，实例是根零件下的普通体，命名、校验、布尔减都照常。
+
+实测基线：
+
+| 情形 | 结果 |
+|---|---|
+| 10³ 立方体沿 X 摆 4 个、间距 20 | 4 体、24 面、2400 mm²（每体 6 面 600） |
+| 10³ 立方体 3×2（间距 20 / 25） | 6 体、36 面、3600 mm² |
+| 6³ 叶片在半径 20 处绕 Z 整圈 6 个 | 6 体、36 面、1296 mm²（每体 6 面 216） |
+| 10³ 放在 x=10..20，按自身 x=10 面镜像 `merge=True` | 1 体、包围盒 20×10×10 |
+| 同上 `merge=False` | 2 体、12 面、1200 mm² |
+
+四条必须知道的：
+
+1. **没有用官方的 `Pattern.CreateLinear` / `CreateCircular`。** 实测它会把体搬进一个 **component**：20³ 立方体做完 4 个线性阵列后 `GetRootPart().Bodies.Count` 变成 **0**、`Components.Count` 变成 **1**（实例成了 occurrence），下游的命名、`body_size`、`verify_model.py` 就全看不见体了。所以这里是"`Copy.Execute` + `move`/`rotate`"。
+2. **官方数据对象只认真实几何。** `LinearPatternData.LinearDirection` / `CircularPatternData.CircularAxis` 传 `Selection.CreateByObjects(Line.Create(...))` 或传 `Direction` 都会当场 `SystemError: Collection is empty`；给体的边或面才行。
+3. **`Copy.Execute` 是原地复制，副本会并进它落点上的"别的体"。** 所以 `_copy_body` 先把种子搬到文档包围盒之外复制、再一起搬回来；你自己复制体时也要留意——实测把叶片阵列摆在管子上，叶片被并成了 10×13×10、9 个面的怪东西。
+4. **cutter 与流域壁面相切时会静默失效。** 实测 3×3 管束，圆心到壁面的距离正好等于半径时，9 根里只挖出来 4 根。管束要把管子**完全放在域内**（下面例子里内缩了 6mm）。
+5. **`mirror` 的镜面必须是模型里真实存在的一张平面面**（通常是对称面），临时造 Plane/Line 传不进去。
+
+管束流域的写法（域先建，再逐个 `cut=True`）：
+
+```python
+domain = box(60.0, 40.0, 30.0, origin=(700.0, 0.0, 0.0), name="BankDomain")
+for ix in range(3):
+    for iy in range(3):
+        cylinder(3.0, 40.0, origin=(706.0 + ix*12.0, 6.0 + iy*12.0, -5.0), axis="z", cut=True)
+name_faces_by_rules(domain, [
+    ("inlet",  {"normal": "x", "sign": -1}),
+    ("outlet", {"normal": "x", "sign": +1}),
+    ("tubes",  {"kind": "cylinder"}),
+    ("wall",   {"rest": True}),
+])
+```
+
+实测结果：15 个面 = 6 张平面 + 9 张管壁；inlet/outlet 各 1200 mm²、管壁 9 × 565.49 = 2π·3·30、上下壁各 2145.53 = 2400 − 9·π·3²。
+
 ## 2. Run it
 
 ```powershell
@@ -362,9 +411,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_fillet.py"        -Out "$S\tests\selftest_fillet.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_elbow.py"         -Out "$S\tests\selftest_elbow.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_shell.py"         -Out "$S\tests\selftest_shell.scdocx"         -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_array.py"         -Out "$S\tests\selftest_array.scdocx"         -Verify
 ```
 
-All seventeen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All eighteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -385,6 +435,7 @@ All seventeen must end in `[scdm] status=ok` and print the verify block. Regress
 | `selftest_fillet` | 10 bodies: `RoundCube 20³` (26 faces / 48 edges — 24 line + 24 circle) · `RoundCubeZ 20³` (10 / 24) · `ChamferCube 20³` (26 / 48 lines) · `RoundTube 20x20x20` (8 / 8 circles) · `RoundedDuct 4x4x10` (10 / 24) · `RuleBox 20³` (26 / 56) · `ChamferTwo 20³` (10 / 24) · `FaceRound 20³` (10 / 20 — 16 line + 4 ellipse) · `TooBig 10³` (6 — r=9 refused, untouched) · `Stale 20³` (26) | cu_inlet/outlet 各 256.00 mm² @ (10,10,0)/(10,10,20) · cu_side 4 × 256.00 · cu_edge_fillet 12 × 50.27 · cu_corner 8 × 6.28 · cz_inlet/outlet 各 392.27 @ (40,10,0)/(40,10,20) · cz_fillet 4 × 94.25 · cz_side 4 × 280.00 · duct_inlet/outlet 各 15.14 @ (2,82,0)/(2,82,10) · duct_fillet 4 × 15.71 · duct_wall 4 × 20.00 |
 | `selftest_elbow` | 3 bodies: `Bend 44×44×6.009` (7 faces) · `Elbow45 4×12.021×7.808` (3) · `UTurn 28×14×4` (3) | Bend: inlet 28.27 @ (0,-21,0) · outlet 28.27 @ (-41,20,0) · bend_wall 573.89 · wall 4 faces (405.27 / 405.27 / 0.13 / 0.13) · Elbow45: e45_inlet 12.57 @ (0,60,0) · e45_wall 148.04 · e45_outlet 12.57 · UTurn: uturn_inlet 12.57 @ (0,120,0) · uturn_wall 473.74 · uturn_outlet 12.57 @ (-24,120,0) |
 | `selftest_shell` | 7 bodies: `HollowCube 20³` (12 faces) · `OpenCup 20³` (11) · `OpenDuct 20³` (10) · `HollowCyl 20×20×20` (6 — 4 plane + 2 cylinder) · `Outward 24³` (12) · `TooThick 20³` (6 — t=11 refused, untouched) · `PreNamed 20³` (11) | hollow_outer 6 × 400.00 · hollow_cavity 6 × 256.00 @ ±2 · cup_rim 144.00 @ (50,10,20) · cup_outer 5 × 400.00 · cup_inner 5 面 · duct_rim/duct_rim2 各 144.00 @ z=20/z=0 · duct_outer 4 × 400.00 · duct_inner 4 × 320.00 · pre_outlet 被重映射成 144.00 |
+| `selftest_array` | 22 bodies: `Pin_1..4` (各 6 面) · `Fin_1..6` (6) · `Blade_1..6` (6) · `Half` (合并后 1 体 20×10×10) · `Half2` + `Half2Mirror` · `BankDomain 60×40×30` (**15 面**) | bank_inlet/bank_outlet 各 1200.00 @ (700,20,15)/(760,20,15) · bank_tubes **9 × 565.49** @ 706/718/730 × 6/18/30 · bank_wall 4 面（1800 / 1800 / 2145.53 / 2145.53） |
 
 Run these before blaming a new model script.
 

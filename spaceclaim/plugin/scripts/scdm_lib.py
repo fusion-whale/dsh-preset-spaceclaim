@@ -1802,6 +1802,213 @@ def shell(body, thickness, open_faces=None, outward=False):
 
 
 # ---------------------------------------------------------------------------
+# 阵列 / 镜像
+#
+# **不用官方的 `Pattern.CreateLinear` / `CreateCircular`** —— 实测它会把体搬进一个
+# component：20³ 立方体做完 4 个线性阵列后 `GetRootPart().Bodies.Count` 变成 **0**、
+# `GetRootPart().Components.Count` 变成 **1**（实例成了 occurrence）。
+# 那样下游的命名、`body_size`、`verify_model.py` 全部看不见体了。
+# 另外数据对象里的方向/轴必须给**真实可选的几何**：
+# `Selection.CreateByObjects(Line.Create(...))` 和传 `Direction` 都会直接
+# `SystemError: Collection is empty`。
+#
+# 所以这里的阵列是"复制 + 平移/旋转"：`Copy.Execute(Selection.Create(body))`
+# 会在原地生成一个副本（副本与原体相互独立），再 `move` / `rotate` 摆位。
+# 好处是实例始终是根零件下的普通体，命名、校验、布尔减全都照常。
+#
+# 还有一个实测坑：**原地的副本如果压着别的体，会并进那个体**（不是并进种子体），
+# 所以 `_copy_body` 会先把种子搬到文档包围盒之外的空白处复制、再一起搬回来。
+#
+# 阵列给的是**实体实例**。要在流域上开一排孔 / 管束，直接对每个位置调
+# `cylinder(..., cut=True)` 更直接（cutter 不落盘，也不会跟别的东西并集）。
+# ---------------------------------------------------------------------------
+
+def _free_shift(body, margin=10.0):
+    """算一个位移，把 body 搬到**整个文档包围盒之外**的空白处（沿 X 正方向）。
+
+    为什么要这样：`Copy.Execute` 是**原地**复制。如果种子体当时正好压在别的体上，
+    副本一生成就会被并进那个体（实测：叶片阵列放在管子上，结果叶片被并成了
+    10x13x10、9 个面的怪东西）。所以复制前先把种子挪到空白处，复制完再挪回来。
+    """
+    hi_x = None
+    for b in GetRootPart().Bodies:
+        e = body_extent(b, "x")
+        if hi_x is None or e[1] > hi_x:
+            hi_x = e[1]
+    if hi_x is None:
+        return (0.0, 0.0, 0.0)
+    lo = body_extent(body, "x")[0]
+    return (hi_x + float(margin) - lo, 0.0, 0.0)
+
+
+def _copy_body(body):
+    """复制一个体，返回新体（一定与原体相互独立）。
+
+    实测要点：`Copy.Execute(Selection.Create(body))` 会在**原地**生成副本；
+    副本与原体本身不会并集（20³ 复制后确实是 2 个体），但如果原地压着**别的**体，
+    副本会并进那个体。所以这里先把种子搬到文档包围盒之外复制，再一起搬回来。
+    """
+    dx, dy, dz = _free_shift(body)
+    moved = (abs(dx) > 1e-9 or abs(dy) > 1e-9 or abs(dz) > 1e-9)
+    if moved:
+        move(body, dx, dy, dz)
+    new_body = None
+    try:
+        snap = _snapshot_bodies()
+        try:
+            res = Copy.Execute(Selection.Create(body))
+        except:
+            raise RuntimeError("copy failed: SpaceClaim refused to copy this body")
+        new_body = _created_body(res, snap)
+    finally:
+        if moved:
+            move(body, -dx, -dy, -dz)
+    if new_body is None:
+        raise RuntimeError("copy failed: the copy did not appear as a new body")
+    if moved:
+        move(new_body, -dx, -dy, -dz)
+    return new_body
+
+
+def _name_instances(items, name):
+    if not name:
+        return items
+    for k in range(len(items)):
+        try:
+            items[k].Name = "%s_%d" % (name, k + 1)
+        except:
+            pass
+    return items
+
+
+def array_linear(body, count, pitch, axis="x", count2=0, pitch2=None, axis2=None, name=None):
+    """线性阵列（复制 + 平移），返回**所有实例**（含原体），单位 mm。
+
+    body    种子体
+    count   第一方向的实例数（含原体）；pitch 是间距
+    axis    第一方向，"x"/"y"/"z"
+    count2  第二方向实例数（可选，做 2D 阵列）；pitch2、axis2 配套
+    name    给了就依次命名成 name_1、name_2 …（ASCII）；不给就沿用原体名
+
+    实测：10³ 立方体 4 个实例、间距 20（沿 X）-> 4 个体、24 个面、总面积 2400
+    （每个 6 面 600），整体包围盒 X 从 0 到 70。
+    """
+    n1 = int(count)
+    if n1 < 1:
+        raise ValueError("array_linear: count must be >= 1")
+    p1 = float(pitch)
+    a1 = _dir_vector(axis)
+    items = []
+    for i in range(n1):
+        if i == 0:
+            bb = body
+        else:
+            bb = _copy_body(body)
+            move(bb, a1[0] * p1 * i, a1[1] * p1 * i, a1[2] * p1 * i)
+        items.append(bb)
+    n2 = int(count2 or 0)
+    if n2 > 1:
+        if pitch2 is None:
+            raise ValueError("array_linear: pitch2 is required when count2 > 1")
+        ax2 = axis2
+        if ax2 is None:
+            order = {"x": "y", "y": "z", "z": "x"}
+            ax2 = order.get(str(axis).lower(), "y")
+        a2 = _dir_vector(ax2)
+        p2 = float(pitch2)
+        base = list(items)
+        for j in range(1, n2):
+            for bb in base:
+                cc = _copy_body(bb)
+                move(cc, a2[0] * p2 * j, a2[1] * p2 * j, a2[2] * p2 * j)
+                items.append(cc)
+    return _name_instances(items, name)
+
+
+def array_circular(body, count, axis="z", center=(0.0, 0.0, 0.0), angle_deg=360.0, name=None):
+    """圆周阵列（复制 + 绕轴旋转），返回所有实例（含原体）。
+
+    count     实例数（含原体）
+    axis      旋转轴方向，"x"/"y"/"z"
+    center    轴上一点，单位 mm
+    angle_deg 总张角；给 360（默认）时按 360/count 均分整圈，
+              否则按 angle/(count-1) 均分（首尾正好落在 0 和 angle 上）
+    name      给了就依次命名成 name_1、name_2 …（ASCII）
+
+    实测：6³ 的叶片放在半径 20 处、绕 Z 轴 6 个整圈阵列 -> 6 个体、36 个面、
+    总面积 1296（每个 6 面 216）。
+    """
+    n = int(count)
+    if n < 1:
+        raise ValueError("array_circular: count must be >= 1")
+    total = float(angle_deg)
+    if abs(total - 360.0) < 1e-9:
+        step = 360.0 / n
+    elif n > 1:
+        step = total / (n - 1)
+    else:
+        step = 0.0
+    items = []
+    for i in range(n):
+        if i == 0:
+            bb = body
+        else:
+            bb = _copy_body(body)
+            rotate(bb, step * i, axis=axis, center=center)
+        items.append(bb)
+    return _name_instances(items, name)
+
+
+def mirror(body, plane_face, merge=True, name=None):
+    """按一张**已经存在的平面面**镜像一个体，返回 [原体] 或 [原体, 副本]。
+
+    plane_face 必须是模型里真实存在的一张平面面（通常就是对称面）。
+                **不能**临时造一个 Plane/Line 传进来——数据选择只认真实几何。
+    merge      True（默认，SpaceClaim 自己的默认）：副本与原体并成一个体
+               （半模型补成整模型最常用）
+               False：副本保持独立，返回两个体
+    name       给了就命名副本为 name（ASCII）
+
+    实测：10³ 立方体放在 x=10..20，按它自己的 x=10 那张面镜像、merge=True
+    -> 1 个体、包围盒变成 20×10×10；merge=False -> 2 个体、各 6 面。
+    """
+    faces = plane_face
+    if not isinstance(faces, (list, tuple)):
+        faces = [faces]
+    faces = [f for f in faces if f is not None]
+    if not faces:
+        raise ValueError("mirror: a planar face of the model is required as the mirror plane")
+
+    keys = {}
+    for x in GetRootPart().Bodies:
+        keys[_body_key(x)] = 1
+    before = _model_signature()
+
+    opts = MirrorOptions()
+    opts.MergeObjects = bool(merge)
+    try:
+        Mirror.Execute(Selection.Create(body), Selection.Create(faces[0]), opts, None)
+    except:
+        raise RuntimeError("mirror failed: SpaceClaim refused this body / mirror plane "
+                           "(the plane must be a real planar face of the model)")
+
+    after = _model_signature()
+    if before == after:
+        raise RuntimeError("mirror: SpaceClaim reported success but the geometry did not change")
+
+    out = [body]
+    for x in GetRootPart().Bodies:
+        if _body_key(x) not in keys:
+            out.append(x)
+    if name and len(out) > 1:
+        try:
+            out[1].Name = name
+        except:
+            pass
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 命名选择（Named Selection）
 # ---------------------------------------------------------------------------
 

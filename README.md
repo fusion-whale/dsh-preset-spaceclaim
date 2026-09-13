@@ -1,6 +1,6 @@
 # dsh-preset-spaceclaim
 
-**给 DeepSeek Harness（DSH）加一个「SpaceClaim 建模」预设**：装上之后，任何人的 DSH 会话都能按你的要求建 SpaceClaim 几何、倒圆角/倒角、做真圆截面弯头、抽壳、命名边界（`inlet` / `outlet` / `wall` / `interface` / `baffle`…），而且每一步都有独立校验。
+**给 DeepSeek Harness（DSH）加一个「SpaceClaim 建模」预设**：装上之后，任何人的 DSH 会话都能按你的要求建 SpaceClaim 几何、倒圆角/倒角、做真圆截面弯头、抽壳、阵列/镜像（管束、针翅、叶片排）、命名边界（`inlet` / `outlet` / `wall` / `interface` / `baffle`…），而且每一步都有独立校验。
 
 > Give the DeepSeek Harness an agent preset that can build Ansys SpaceClaim geometry and name its boundary zones from a plain-language request. Docs are in Chinese.
 
@@ -58,11 +58,12 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"D:\cfd\channel.scdocx", body)
 ```
 
-弯头、抽壳这类也是同一套写法：
+弯头、抽壳、阵列这类也是同一套写法：
 
 ```python
 bend = elbow(pipe_radius=5.0, bend_radius=30.0, angle_deg=90.0, name="Bend")   # 真圆截面弯头
 shell(duct, 2.0, open_faces=faces_by_normal(duct, "z", 1) + faces_by_normal(duct, "z", -1))
+array_linear(pin, 4, 20.0, axis="x", count2=3, pitch2=20.0, name="Pin")        # 3x4 针翅阵列
 ```
 
 ## 插件提供的工具
@@ -116,7 +117,7 @@ spaceclaim/                        ← 预设包本体（install.ps1 复制这�
 │   ├── package.json
 │   ├── lib/index.js               注册 scdm_build
 │   └── scripts/                   运行器 + 建模库 + 校验脚本（自包含副本）
-└── skills/spaceclaim-modeling/    技能：SKILL.md + 参考文档 + 17 个回归用例
+└── skills/spaceclaim-modeling/    技能：SKILL.md + 参考文档 + 18 个回归用例
 test/smoke.mjs                     冒烟测试（--live 会真跑一次建模）
 ```
 

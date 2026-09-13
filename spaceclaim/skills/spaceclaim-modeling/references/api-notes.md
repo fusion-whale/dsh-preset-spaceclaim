@@ -909,6 +909,82 @@ Shell.RemoveFaces(ISelection faces, Double offset, ICommandInfo info)    -- 删�
   换成正偏移（`outward`）时同一组却**整组消失**（第 15 轮 probe9 实测）。
   结论：**先抽壳、后命名**，不要指望抽壳之后的旧命名还有意义。
 
+## 22. 阵列与镜像（第 18 个回归用例）
+
+### 22.1 官方 Pattern 不能用：它会把体搬进 component
+
+反射出来的签名是现成的：
+
+```
+Pattern.CreateLinear(ISelection selection, LinearPatternData data, ICommandInfo info)
+Pattern.CreateCircular(ISelection selection, CircularPatternData data, ICommandInfo info)
+LinearPatternData    : PatternDimension(One/Two) / LinearDirection / CountX / PitchX / CountY / PitchY
+CircularPatternData  : PatternDimension / CircularAxis / RadialDirection / CircularCount /
+                       CircularAngle / LinearCount / LinearPitch
+```
+
+两个操作层面的坑：
+
+1. **方向/轴只能给真实几何。** `LinearDirection = Selection.CreateByObjects(Line.Create(...))`
+   或传 `Direction.Create(...)`，赋值当场就 `SystemError: Collection is empty`
+   （数据对象会立刻求值这个选择）。给**体的一条边**或**一张面**才行。
+2. **调用成功后体不在了。** 10³ 立方体用一条自身边做方向、4 个实例：
+
+   | | 调用前 | 调用后 |
+   |---|---|---|
+   | `GetRootPart().Bodies.Count` | 1 | **0** |
+   | `GetRootPart().Components.Count` | 0 | **1** |
+
+   `PatternResult.Success=True`、`CreatedObjects.Count=0`，体变成了 component 里的
+   occurrence（component 上有 `GetAllBodies` / `GetBodies` / `GetInstance` / `GetOccurrence`）。
+   这意味着 `body_size`、`name_faces`、`verify_model.py` 这一整套都**看不见体**了。
+
+   **所以阵列改用"复制 + 平移/旋转"实现**，实例始终留在根零件下。
+
+### 22.2 `Copy.Execute` 是原地复制，而且会并进落点上的"别的体"
+
+```
+Copy.Execute(ISelection selection) -> CopyResult        // CopyResult.CreatedObjects
+```
+
+- 副本与**原体本身**不会并集：20³ 复制一次 → 2 个体、12 个面 ✓。
+- 但如果种子体原地就压在**别的**体上，副本一生成就并进那个体。实测：把 6³ 叶片阵列
+  摆在管子上，叶片被并成了 `10×13×10`、**9 个面**的怪东西，而阵列看起来"成功"了。
+- 对策（库里 `_copy_body` 的做法）：先把种子沿 X 搬到**整个文档包围盒之外**复制，
+  再把原体和副本一起搬回来。搬动不会并集（刚体变换）。
+
+### 22.3 `Mirror` 可用，镜面必须是真实存在的平面面
+
+```
+Mirror.Execute(ISelection selection, ISelection mirrorPlane, MirrorOptions options, ICommandInfo info)
+MirrorOptions : MergeObjects / CreateRelationships
+```
+
+实测：10³ 立方体放在 x=10..20、按它自己的 x=10 那张面镜像：
+
+| `MergeObjects` | 结果 |
+|---|---|
+| True（默认） | **1 个体**、包围盒变成 20×10×10（副本并进原体） |
+| False | **2 个体**，各 6 个面、各 600 mm² |
+
+### 22.4 又一个静默失效：cutter 与壁面相切
+
+第 18 个用例的管束场景第一次跑出来只有 4 根管子（应为 9 根）：
+圆心到流域壁面的距离**正好等于**管半径时（管子与壁面相切），那一次 `cut=True` 静默失效，
+既不报错也不留面。把管子整体内缩（库里用例内缩 6mm）之后 9 根全对。
+
+**结论：cutter 必须完全落在被减体内部，相切也算不合法。**
+
+### 22.5 实测基线
+
+| 情形 | 结果 |
+|---|---|
+| 10³ 沿 X 4 个、间距 20 | 4 体、24 面、2400 mm²（每体 6 面 600） |
+| 10³ 3×2（20 / 25） | 6 体、36 面、3600 mm² |
+| 6³ 叶片半径 20、绕 Z 整圈 6 个 | 6 体、36 面、1296 mm²（旋转过的包围盒变成 8.196×8.196×6，正常） |
+| 管束流域 60×40×30 + 3×3 根 r=3 贯穿管 | 15 面 = 6 平面 + 9 管壁；inlet/outlet 各 1200；管壁各 565.49 = 2π·3·30；上下壁各 2145.53 = 2400 − 9π·3² |
+
+
 
 
 
