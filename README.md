@@ -17,10 +17,21 @@ DSH 里"给 AI 加能力"有两种载体，这个仓库**两样都装**：
 
 ## 安装
 
+### 换一台电脑要准备什么
+
+| 前提 | 说明 |
+|---|---|
+| **Windows** | 运行器是 PowerShell 脚本，SpaceClaim 本身也只有 Windows 版 |
+| **已安装 Ansys SpaceClaim** | 脚本会自动探测 `SpaceClaim.exe`。装在非默认位置时用环境变量 `DSH_SCDM_EXE` 指定完整路径，或用 `-SpaceClaimExe` 参数 |
+| PowerShell 5.1+ | Windows 自带。下面的示例用 `powershell -File`（本机实测 `pwsh` 不一定在 PATH 里） |
+| 已装 DSH | 这一步只是给现有 DSH 加一个预设，不装 DSH 的话请改用上面那个独立工具包 |
+
+一条命令走完：
+
 ```powershell
 git clone https://github.com/fusion-whale/dsh-preset-spaceclaim.git
 cd dsh-preset-spaceclaim
-pwsh -File .\spaceclaim\install.ps1
+powershell -ExecutionPolicy Bypass -File .\spaceclaim\install.ps1
 ```
 
 安装脚本做两件事：
