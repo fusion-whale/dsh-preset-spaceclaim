@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d: `edge_kind`, `edge_length`, `edge_center`, `edge_extent`, `edge_direction`, `edge_axis`, `edge_points`, `edge_distance_to_point`, `edge_is_smooth`, `edge_is_concave`, `edge_summary`, `edges_where`, `edges_by_kind`, `edges_parallel`, `edges_perpendicular`, `edges_along_axis`, `edges_at`, `edges_between`, `edges_in_box`, `edges_by_length`, `edges_by_curvature`, `edges_of_face`, `edges_of_faces`, `edges_at_point`, `nearest_edge`, `match_edges`, `round_edges`, `round_face_edges`, `round_vertical_edges`, `round_outer_rims`, `round_by_rules`, `chamfer_edges`, `chamfer_by_rules`.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -155,6 +155,66 @@ name_faces_by_rules(body, [
 - `faces_match(f1, f2)` —— 两张面是否几何对应（周期面/对称面的自检）
 - `name_face_pair(name_a, name_b, f1, f2)` —— 给一对面分别命名
 
+## 1d. 倒圆角 / 倒角（边这套玩法）
+
+圆角是**边**上的操作，和"按规则挑面"是同一套思路，只是把面换成了边。
+
+```python
+cube = box(20.0, 20.0, 20.0, origin=(0, 0, 0), name="Box")
+
+round_edges(cube, 2.0)                              # 整个体所有边倒圆 r=2
+round_edges(edges_parallel(cube, "z"), 3.0)         # 只倒四条竖边
+round_edges(edges_by_kind(cube, "circle"), 1.0)     # 只倒所有圆边
+round_face_edges(faces_by_normal(cube, "z", 1), 3.0)  # 顶面四周倒圆
+round_vertical_edges(cube, 2.0)                     # = edges_parallel + round
+round_outer_rims(pipe, 1.0)                         # 管口两圈圆边倒圆
+
+chamfer_edges(cube, 2.0)                            # 倒角
+chamfer_edges(edges_parallel(cube, "z"), 4.0, 1.0)  # 两侧不等距倒角 d1=4 d2=1
+```
+
+规则表版本（和 `name_faces_by_rules` 对称）：
+
+```python
+round_by_rules(duct, [
+    ({"parallel": "z"}, 1.0),      # 四条长边 r=1
+    ({"rest": True}, 0.5),         # 剩下的 r=0.5
+])
+chamfer_by_rules(duct, [({"kind": "circle"}, 0.5)])   # 只倒圆边
+```
+
+### 挑边的说法 → 规则对照
+
+| 用户这么说 | 写法 |
+|---|---|
+| 四条竖边 / 沿 Z 的棱 | `edges_parallel(body, "z")` 或 `{"parallel":"z"}` |
+| 圆管口的圆边 / 圆环边 | `edges_by_kind(body, "circle")`、`edges_along_axis(body, "z")`、`{"kind":"circle"}` |
+| 顶面四周的边 | `edges_of_faces(top_face)` / `round_face_edges(top_face, r)` |
+| z=0 那一圈边 | `edges_at(body, "z", 0.0)` 或 `{"at":("z",0.0)}` |
+| 某个区域里的边 | `edges_in_box(...)` / `{"in_box":(...)}` |
+| 长边 / 短边 | `edges_by_length(body, min_length=10)` / `{"length_min":10}` |
+| 经过点 (x,y,z) 的边、离它最近的边 | `edges_at_point(...)` / `nearest_edge(...)`，规则 `{"point":(...)}` / `{"nearest":(...)}` |
+| 剩下的边 | `{"rest": True}` |
+
+边也能直接量：`edge_kind`（`line`/`circle`/`ellipse`）、`edge_length`（mm）、`edge_center`、`edge_extent`、`edge_direction`（只对直线边有值）、`edge_axis`（曲边自身轴向）、`edge_summary(body)`（`{'total':12,'line':12}` 这种）。
+
+### 实测基线与三条硬规矩
+
+`selftest_fillet` 里的数字都对着手算核过：
+
+| 操作 | 结果 |
+|---|---|
+| 20mm 立方体 12 条边全倒圆 r=2 | 面数 6 → **26**（6 平面 + 12 圆柱面 + 8 球角面），边长 20 不变；总面积 2189.45 mm² = 6×256 + 12×50.27 + 8×6.28 |
+| 20mm 立方体只倒 4 条竖边 r=3 | 面数 → **10**；端面 392.27 = 400 − (4−π)·9，倒圆面 94.25 = (π·3/2)·20，侧壁 280 = (20−6)·20 |
+| 20mm 立方体 12 条边全倒角 d=2 | 面数 → **26**（6 平面 + 12 斜面 + 8 三角面） |
+| 4×4×10 方管四条长边倒圆 r=1 | 面数 → **10**；端面 15.14 = 16 − (4−π)，倒圆面 15.71 = (π/2)·10，平面壁 4×20.00 |
+
+1. **倒圆 / 倒角只吃"边"。** 传一张面（`ConstantRound.Execute(Selection.Create(face), …)`) 抛 StandardError，传一个体抛 ValueError——体不会自动展开成边。所以"把这个面倒圆"要写 `round_face_edges(face, r)`。
+2. **每次倒完，边的包装对象全部失效。** 复用倒角前抓的 `body.Edges` 列表再倒一次一定失败（实测抛 `RuntimeError`）。想连续倒，就每次重新用 `edges_parallel` / `edges_by_kind` 从当前体上取一遍——`round_by_rules` 内部就是这么做的，所以规则表里 `{"rest":True}` 拿到的是**当前**体上剩下的边：实测 20mm 立方体先倒 4 条竖边，`{"rest":True}` 拿到 16 条而不是 8 条（多出来的是倒圆新长出的 8 条切向直线边）。
+3. **半径太大、或边集里混了切向边，SpaceClaim 报的是中文 StandardError**（"无法对边倒圆角"）。非 ASCII 异常一旦逃出脚本会让宿主静默中止，所以库里把这类失败统一转成 ASCII 的 `RuntimeError`；同时按"体数 / 面数 / 总面积"指纹**核对几何真的变了没有**，`Success=True` 但什么都没发生一样会报错。
+
+一个必须知道的面数直觉：整块倒圆之后，**平面面会缩成 (边长 − 2r)² 的方块，倒圆面和平面面之间是相切软边，不产生边**。所以 20mm 立方体 r=2 的每个平面面是 16×16 = 256 mm²，不是"20×20 去四角"。用面中心定位命名规则时不受影响，但按面积卡规则时要按这个数来。
+
 ## 2. Run it
 
 ```powershell
@@ -196,6 +256,8 @@ The runner composes the script, runs the verified command line, and judges succe
 | Sphere / boolean cut | `SphereBody.Create(center, radius)` works: r=5 gives 1 body, 1 face of kind `sphere`, area 314.16 mm², bbox 10³. But **`ExtrudeType.Cut` does not cut for a sphere** — the sphere becomes a separate body and the target keeps its 6 faces. `ExtrudeType.ForceCut` does work (verified: a 20³ box gains a 7th face, the spherical cavity, area 452.39 mm² = 4πr²). `box`/`cylinder` cuts are verified fine with plain `Cut`. |
 | Body names | An unnamed body keeps a **localised** default name (Chinese here). `"%s" % body.Name` raises `UnicodeEncodeError` during formatting — *outside* `_safe_print`'s protection — and kills the script. Use `_ascii(name)` (in the library) before formatting; `verify_model.py` does this for body names. |
 | Units | `MM(x)` converts mm to internal metres. `Point.Create` takes metres — never pass raw mm. |
+| Round / chamfer | `ConstantRound.Execute(edgeSelection, MM(r), None)` and `Chamfer.Execute(edgeSelection, MM(d1)[, MM(d2)], None, None)` work on 2022 R1; `ICommandInfo = None` is safe in **these** positions. They take **edges only** (a face → StandardError, a body → ValueError). Failures raise a **Chinese** `StandardError`, so always catch and re-raise ASCII. `ConstantRoundResult.CreatedSurfaces.Count` is **0** even on success — judge by face count / total area, never by the result collections. Every round invalidates the previous `DesignEdge` wrappers. See §1d. |
+| Edge geometry | `DesignEdge.Shape` is a `Modeler.Edge`: `.Length` (metres), `.StartPoint`/`.EndPoint` (**these do work on the raw shape** — the failure was on `DesignEdge` itself), `.GetBoundingBox(Matrix.CreateScale(1.0))`, `.IsSmooth`, `.IsConcave`, `.Geometry`. `Geometry` is a `Geometry.Line` (has `.Direction`/`.Origin`) or `Geometry.Circle`/`Ellipse` (no `.Direction`) — that type name is what `edge_kind()` returns, and it is the only reliable way to tell a straight edge from a rim. |
 | Saving | `DocumentSave.Execute(path)`; delete an existing file first to avoid overwrite prompts. |
 
 ## 4. Failure triage
@@ -227,9 +289,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_sphere.py"         -Out "$S\tests\selftest_sphere.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_imprint.py"        -Out "$S\tests\selftest_imprint.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_external_flow.py" -Out "$S\tests\selftest_external_flow.scdocx" -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_fillet.py"        -Out "$S\tests\selftest_fillet.scdocx"        -Verify
 ```
 
-All fourteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All fifteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -247,6 +310,7 @@ All fourteen must end in `[scdm] status=ok` and print the verify block. Regressi
 | `selftest_sphere` | 2 bodies: `Ball 10x10x10` (1 face) · `Cavity 20x20x20` (7 faces = 6 planes + spherical cavity) | ball_surface 314.16 mm² @ (0,0,0) · cavity_wall 452.39 mm² @ (60,0,0) |
 | `selftest_imprint` | 2 bodies: `Plate 40x40x10` (7 faces after the split) · `Cutter 10x10x40` | patch 78.54 mm² @ (20,20,0) loops=1 · rest 1521.46 mm² @ (20,20,0) loops=2 |
 | `selftest_external_flow` | 1 body: `Domain 60x40x40` (7 faces) — the cylinder obstacle was absorbed as a void | inlet/outlet 1600 mm² @ (0,20,20)/(60,20,20) · obstacle 1256.64 mm² @ (30,20,20) · top/bottom_wall 2321.46 mm² @ z=40/z=0 · side_wall 2 faces × 2400 mm² |
+| `selftest_fillet` | 10 bodies: `RoundCube 20³` (26 faces / 48 edges — 24 line + 24 circle) · `RoundCubeZ 20³` (10 / 24) · `ChamferCube 20³` (26 / 48 lines) · `RoundTube 20x20x20` (8 / 8 circles) · `RoundedDuct 4x4x10` (10 / 24) · `RuleBox 20³` (26 / 56) · `ChamferTwo 20³` (10 / 24) · `FaceRound 20³` (10 / 20 — 16 line + 4 ellipse) · `TooBig 10³` (6 — r=9 refused, untouched) · `Stale 20³` (26) | cu_inlet/outlet 各 256.00 mm² @ (10,10,0)/(10,10,20) · cu_side 4 × 256.00 · cu_edge_fillet 12 × 50.27 · cu_corner 8 × 6.28 · cz_inlet/outlet 各 392.27 @ (40,10,0)/(40,10,20) · cz_fillet 4 × 94.25 · cz_side 4 × 280.00 · duct_inlet/outlet 各 15.14 @ (2,82,0)/(2,82,10) · duct_fillet 4 × 15.71 · duct_wall 4 × 20.00 |
 
 Run these before blaming a new model script.
 

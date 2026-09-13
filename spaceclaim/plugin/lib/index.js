@@ -32,7 +32,8 @@ const DESCRIPTION =
 	"Build a 3D model in Ansys SpaceClaim without the GUI, and name its boundary conditions. " +
 	"Use this instead of driving SpaceClaim through a shell: it runs the verified headless path and verifies the result. " +
 	"Workflow: (1) write a short IronPython model script using the helper functions documented by the `spaceclaim-modeling` skill " +
-	"(`box`, `cylinder`, `tube`, `stepped_cone`, `extrude_circle`, `move`, `name_boundaries`, `finish`); the runner injects those helpers, " +
+	"(`box`, `cylinder`, `tube`, `sphere`, `cone_frustum`, `profile_prisms`, `move`, `rotate`, `split_face_by_line`, `round_edges`, `chamfer_edges`, " +
+	"`name_boundaries`, `name_faces_by_rules`, `finish`); the runner injects those helpers, " +
 	"so never import them and never call SpaceClaim's own API directly unless you must; " +
 	"(2) call this tool with the script path and the .scdocx path that the script's `finish(path)` saves to. " +
 	"All geometry units are millimetres (the library converts to SpaceClaim's internal metres). " +

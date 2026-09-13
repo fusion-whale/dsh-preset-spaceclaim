@@ -673,3 +673,94 @@ name_faces_by_rules(domain, [                                       # 3) 一次�
 
 总面积 13899.56 mm²，与手算（盒子表面积 12800 + 孔壁 1256.64 − 两个圆口 157.08）一致 ✓。
 
+## 19. 倒圆角 / 倒角：边这套 API（第 15 个回归用例）
+
+### 19.1 命令签名（反射所得，全部实测可用）
+
+```
+ConstantRound.Execute(ISelection selectObject, Double roundRadius, ICommandInfo info)          <- 用这个
+ConstantRound.Execute(ISelection selection, Double radius, ConstantRoundOptions options, ICommandInfo info)
+ConstantRound.Modify(ISelection selection, Double radiusOffset, ICommandInfo info)
+
+Chamfer.Execute(ISelection selection, Double distance, ICollection chamferStops, ICommandInfo info)   <- distance2=None 走这个
+Chamfer.Execute(ISelection selection, Double d1, Double d2, ICollection chamferStops, ICommandInfo info)
+Chamfer.Execute(ISelection selection, Double distance, Boolean copy, ICommandInfo info)
+Chamfer.Execute(ISelection selection, Double d1, Double d2, Boolean copy, ICommandInfo info)
+
+FullRound.Execute(ISelection selFaces, ICommandInfo info)      <- 实测 Success=True 但面数不变，没用起来
+RoundInfo.Create(DesignFace desFace) -> RoundInfoResult        <- 试出来 Success=False（对立方体面）
+```
+
+`ICommandInfo` 在这两处传 `None` 是安全的（3 参 / 4 参形式都跑通了）。注意这和
+`ExtrudeFaces` 不一样：那里的可选参数位传 `None` 会让宿主静默中止整个脚本。
+
+结果对象有两套名字：
+
+- `ConstantRoundResult` / `ChamferResult` 都有 `CreatedFaces` / `CreatedEdges` / `CreatedSurfaces`，
+  但**实测 `CreatedSurfaces.Count == 0`，哪怕倒角明明成功了**。别拿它当判据，看面数/总面积。
+- 参数类 `ConstantRoundOptions`（只有一个 `Copy` 属性）、`ChamferOptions`（空的）、`Chamfer.ChamferStop`。
+
+### 19.2 三条硬约束
+
+1. **只吃边。** `Selection.Create(face)` → `StandardError`；`Selection.Create(body)` → `ValueError`。
+   体不会自动展开成边。选择对象用 `Selection.Create(edge_list)`（普通 Python list 就行）。
+2. **失败信息是中文。** 半径超出局部可达范围、边集里混了切向边或已倒过角的边时，
+   抛的是中文 `StandardError`（"无法对边倒圆角"）。非 ASCII 的异常信息一旦逃出脚本，
+   宿主会**静默中止整个流程**（见 §10.2），所以 scdm_lib 一律先 `except` 再抛 ASCII 的
+   `RuntimeError`。实测会失败的情况：20mm 立方体给 r=9；把倒角前的 `body.Edges` 列表
+   在倒角后再用一次。
+3. **每次倒完，旧的 `DesignEdge` / `DesignFace` 包装对象全部失效。** 必须重新
+   `body.Edges` / `body.Faces` 取。这是 `round_by_rules` 每条规则都重新枚举的原因，
+   也意味着规则表里的 `{"rest": True}` 看到的是**当前**体（实测 20mm 立方体先倒 4 条竖边，
+   `rest` 拿到 16 条边：8 条原始边 + 8 条倒圆新长出来的切向直线边）。
+
+### 19.3 边的几何怎么读
+
+`DesignEdge` 是包装对象，几何在 `.Shape` 上（`SpaceClaim.Api.V22.Modeler.Edge`）：
+
+| 成员 | 说明 |
+|---|---|
+| `.Length` | **米**，乘 1000 得 mm |
+| `.StartPoint` / `.EndPoint` | 在外壳 `Edge` 上**是可用的**（`DesignEdge` 上才没有）。闭合圆边两端都退化成圆心 |
+| `.GetBoundingBox(Matrix.CreateScale(1.0))` | 解析包围盒：`.Center` / `.MinCorner` / `.MaxCorner`，米 |
+| `.Geometry` | `Geometry.Line` / `Geometry.Circle` / `Geometry.Ellipse` / … **类型名就是边类型** |
+| `.IsSmooth` / `.IsConcave` | 相切软边 / 凹边 |
+| `.GetPolyline(PolylineOptions())` | 离散点，量闭合圆边长度、算点到边距离时用 |
+
+`Geometry.Line` 有 `.Direction` 和 `.Origin`；**曲线类型上没有 `.Direction`**，所以
+`edge_direction()` 先看 `edge_kind() == "line"`，否则会把圆的某个轴向错当成边的方向。
+
+### 19.4 倒圆之后的面数与面积（重要，容易算错）
+
+20mm 立方体 12 条边全倒圆 r=2：面数 **6 → 26**，边数 12 → 48（24 条直线 + 24 条圆）。
+
+- 6 张平面面：**缩成 (20−2r)² = 16×16 = 256 mm² 的方块**，edges=4 全直线。
+- 12 张倒圆面：`cylinder`，`(πr/2)(20−2r) = 50.265 mm²`，edges=4（2 圆 + 2 直线）。
+- 8 张球角面：`sphere`，`4πr²/8 = 2π = 6.283 mm²`，edges=3 全圆。
+- 总面积 2189.451 mm² = 6×256 + 12×50.265 + 8×6.283 ✓（手算一致）。
+
+**别按"20×20 去四角 = 396.57"去算平面面**：平面面和外圈之间是**相切**的，SpaceClaim
+不生成相切边，所以平面面就是那个内缩方块，角上那部分由球角面覆盖。切开看就是
+
+```
+实心体 = { p : dist(p, 内缩立方体 [2,18]³) <= 2 }
+```
+
+自己拿手算核面积时用这个定义，别用"圆角矩形"的公式。
+
+其它实测数值：
+
+| 情形 | 面数 | 关键面积 |
+|---|---|---|
+| 20³ 全倒圆 r=2 | 26 | 平面 6×256.00 · 圆柱 12×50.27 · 球 8×6.28 |
+| 20³ 只倒 4 条竖边 r=3 | 10 | 端面 392.27 = 400−(4−π)·9 · 圆柱 4×94.25 = (π·3/2)·20 · 侧壁 4×280.00 = (20−6)·20 |
+| 20³ 全倒角 d=2 | 26 | 6 平面 + 12 斜面 + 8 三角面，边全是直线 48 条 |
+| 20³ 只倒 4 条竖边、不等距 d1=4 d2=1 | 10 | 边 24 条全直线 |
+| 4×4×10 方管四条长边倒圆 r=1 | 10 | 端面 15.142 = 16−(4−π) · 圆柱 4×15.708 = (π/2)·10 · 平面壁 4×20.00 |
+| tube(10,6,20) 四个管口圆边倒圆 r=1 | 8 | 4 张平面环 + 4 张圆环面（torus 段） |
+
+注意对比第 5、6 行和第 2 行：**端面面积什么时候是"圆角矩形"、什么时候是"内缩方块"，
+取决于相邻的边有没有被一起倒圆**。只倒竖边时端面还是 4×4 去四角（15.14）；
+12 条边全倒时平面面就已经内缩了。
+
+

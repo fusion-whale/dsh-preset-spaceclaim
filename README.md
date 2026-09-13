@@ -1,6 +1,6 @@
 # dsh-preset-spaceclaim
 
-**给 DeepSeek Harness（DSH）加一个「SpaceClaim 建模」预设**：装上之后，任何人的 DSH 会话都能按你的要求建 SpaceClaim 几何、命名边界（`inlet` / `outlet` / `wall`），而且每一步都有独立校验。
+**给 DeepSeek Harness（DSH）加一个「SpaceClaim 建模」预设**：装上之后，任何人的 DSH 会话都能按你的要求建 SpaceClaim 几何、倒圆角/倒角、命名边界（`inlet` / `outlet` / `wall` / `interface` / `baffle`…），而且每一步都有独立校验。
 
 > Give the DeepSeek Harness an agent preset that can build Ansys SpaceClaim geometry and name its boundary zones from a plain-language request. Docs are in Chinese.
 
@@ -53,6 +53,7 @@ AI 会写一个模型脚本并调用 `scdm_build`。也可以自己写脚本再�
 
 ```python
 body = box(8.0, 8.0, 200.0, origin=(0, 0, 0), name="Channel")
+round_edges(edges_parallel(body, "z"), 1.0)
 name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"D:\cfd\channel.scdocx", body)
 ```
@@ -108,7 +109,7 @@ spaceclaim/                        ← 预设包本体（install.ps1 复制这�
 │   ├── package.json
 │   ├── lib/index.js               注册 scdm_build
 │   └── scripts/                   运行器 + 建模库 + 校验脚本（自包含副本）
-└── skills/spaceclaim-modeling/    技能：SKILL.md + 参考文档 + 4 个回归用例
+└── skills/spaceclaim-modeling/    技能：SKILL.md + 参考文档 + 15 个回归用例
 test/smoke.mjs                     冒烟测试（--live 会真跑一次建模）
 ```
 

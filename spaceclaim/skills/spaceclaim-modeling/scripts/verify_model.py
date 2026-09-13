@@ -22,6 +22,13 @@ try:
                     % (bi, _ascii(body.Name), len(list(body.Faces))))
         dx, dy, dz = body_size(body)
         print("[verify] body[%d] size = %.3f x %.3f x %.3f mm" % (bi, dx, dy, dz))
+        es = list(body.Edges)
+        ek = {}
+        for e in es:
+            k = edge_kind(e)
+            ek[k] = ek.get(k, 0) + 1
+        print("[verify] body[%d] edges = %d %s"
+              % (bi, len(es), str(sorted(ek.items()))))
 
     groups = group_summary()
     print("[verify] named selections = %d" % len(groups))

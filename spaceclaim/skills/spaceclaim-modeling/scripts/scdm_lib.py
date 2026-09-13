@@ -876,6 +876,659 @@ def faces_between(body, axis="z", lo=None, hi=None, tol=1e-3):
 
 
 # ---------------------------------------------------------------------------
+# 边（Edge）：倒圆角 / 倒角
+#
+# 官方脚本命令，本机 2022 R1 实测可用：
+#   ConstantRound.Execute(ISelection edges, Double radius, ICommandInfo info)
+#   Chamfer.Execute(ISelection edges, Double d1[, Double d2], ICollection stops, ICommandInfo info)
+# 两处的 ICommandInfo 直接传 None 都不炸（别把它塞进 ExtrudeFaces 的可选参数位，
+# 那个位置传 None 会让宿主静默中止整个脚本——见 SKILL.md 的 Extrude 条目）。
+#
+# 四条硬约束，每一条都是实测撞出来的：
+#  1. **只吃"边"的选择。** 传一张面 -> StandardError；传一个体 -> ValueError
+#     （体选择不会自动展开成边，必须自己取 body.Edges）。
+#  2. 失败（半径超出局部可达范围、边集里混了切向边/已经倒过角的边）时抛的是
+#     **中文** StandardError（"无法对边倒圆角"）。非 ASCII 的异常信息一旦逃出
+#     脚本就会让宿主静默中止，所以这里一律先 except、再抛 ASCII 的 RuntimeError。
+#  3. 倒角完成后，**旧的 DesignEdge / DesignFace 包装对象全部失效**，
+#     必须重新 `body.Edges` / `body.Faces` 取一次。
+#  4. 判定成功看几何，不看 Success（Sweep 就是 Success=True 却什么都不做的反面教材）：
+#     这里比对操作前后的"体数 / 面数 / 总面积"指纹，没变就直接报错。
+# ---------------------------------------------------------------------------
+
+_EDGE_FAIL_HINT = ("SpaceClaim refused the round/chamfer: the radius is too large for "
+                   "the local geometry, or the edge set mixes tangent / already-rounded "
+                   "edges. Use a smaller radius, and re-select the edges from the "
+                   "CURRENT body (edge wrappers go stale after every round).")
+
+
+def _edge_key(edge):
+    """边的稳定标识（优先 Moniker；取不到就用几何指纹兜底）。"""
+    try:
+        m = edge.Moniker
+        if m is not None:
+            return str(m)
+    except:
+        pass
+    c = edge_center(edge)
+    return "%s|%.4f|%.4f|%.4f|%.4f" % (edge_kind(edge), c[0], c[1], c[2], edge_length(edge))
+
+
+def edge_geometry(edge):
+    """边的几何对象（Line / Circle / Ellipse / ...）。"""
+    return _shape_of(edge).Geometry
+
+
+def edge_kind(edge):
+    """边的几何类型（小写）：'line' / 'circle' / 'ellipse' / 'spline' / 'unknown'。"""
+    try:
+        return str(type(_shape_of(edge).Geometry).__name__).lower()
+    except:
+        return "unknown"
+
+
+def edge_length(edge):
+    """边长，单位 mm（外壳的 Length 是米，这里换算过）。"""
+    try:
+        return float(_shape_of(edge).Length) * 1000.0
+    except:
+        return 0.0
+
+
+def _edge_box(edge):
+    box = _shape_of(edge).GetBoundingBox(Matrix.CreateScale(1.0))
+    c = box.Center
+    mn = box.MinCorner
+    mx = box.MaxCorner
+    return ((c.X * 1000.0, c.Y * 1000.0, c.Z * 1000.0),
+            (mn.X * 1000.0, mn.Y * 1000.0, mn.Z * 1000.0),
+            (mx.X * 1000.0, mx.Y * 1000.0, mx.Z * 1000.0))
+
+
+def edge_center(edge):
+    """边的包围盒中心，单位 mm（直线边就是中点，圆边就是圆心）。"""
+    return _edge_box(edge)[0]
+
+
+def edge_extent(edge):
+    """边的解析包围盒 (min, max)，单位 mm。"""
+    b = _edge_box(edge)
+    return (list(b[1]), list(b[2]))
+
+
+def edge_direction(edge):
+    """直线边的单位方向 (dx, dy, dz)；曲边返回 None。
+
+    实测：Geometry.Line 上有 .Direction / .Origin；曲线类型上没有 .Direction，
+    所以这里先看 edge_kind，避免把圆的某个轴向错当成"边的方向"。
+    """
+    if edge_kind(edge) != "line":
+        return None
+    try:
+        d = _shape_of(edge).Geometry.Direction
+        v = (float(d.X), float(d.Y), float(d.Z))
+    except:
+        return None
+    L = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) ** 0.5
+    if L <= 0.0:
+        return None
+    return (v[0] / L, v[1] / L, v[2] / L)
+
+
+def edge_axis(edge):
+    """曲边自身的轴向（圆边所在平面的法向）：XY 平面里的圆返回 (0,0,1)；取不到返回 None。"""
+    try:
+        g = _shape_of(edge).Geometry
+    except:
+        return None
+    cand = None
+    try:
+        cand = g.Frame.DirZ
+    except:
+        try:
+            cand = g.Axis
+        except:
+            try:
+                cand = g.Normal
+            except:
+                cand = None
+    if cand is None:
+        return None
+    try:
+        v = (float(cand.X), float(cand.Y), float(cand.Z))
+    except:
+        return None
+    L = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) ** 0.5
+    if L <= 0.0:
+        return None
+    return (v[0] / L, v[1] / L, v[2] / L)
+
+
+def edge_is_smooth(edge):
+    """这条边是不是两张面相切处的"软边"（倒角面上大量存在）。"""
+    try:
+        return bool(_shape_of(edge).IsSmooth)
+    except:
+        return False
+
+
+def edge_is_concave(edge):
+    """凹边（内角）返回 True，凸边（外角）返回 False。"""
+    try:
+        return bool(_shape_of(edge).IsConcave)
+    except:
+        return False
+
+
+def edge_points(edge, max_points=0):
+    """边上的采样点列表（mm）。
+
+    闭合圆边不能用 StartPoint/EndPoint（它们返回的是圆心，是退化的），
+    所以走 GetPolyline 离散。
+    """
+    pts = _edge_points(_shape_of(edge))
+    out = []
+    for p in pts:
+        out.append((float(p.X) * 1000.0, float(p.Y) * 1000.0, float(p.Z) * 1000.0))
+        if max_points and len(out) >= max_points:
+            break
+    return out
+
+
+def _seg_distance(a, b, p):
+    """点 p 到线段 ab 的距离（都按 mm 给）。"""
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    dz = b[2] - a[2]
+    L2 = dx * dx + dy * dy + dz * dz
+    if L2 <= 0.0:
+        t = 0.0
+    else:
+        t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy + (p[2] - a[2]) * dz) / L2
+        if t < 0.0:
+            t = 0.0
+        elif t > 1.0:
+            t = 1.0
+    qx = a[0] + t * dx
+    qy = a[1] + t * dy
+    qz = a[2] + t * dz
+    return ((p[0] - qx) ** 2 + (p[1] - qy) ** 2 + (p[2] - qz) ** 2) ** 0.5
+
+
+def edge_distance_to_point(edge, x, y, z):
+    """点到边的最近距离（mm）。按采样折线做线段距离，不是只看端点。"""
+    pts = edge_points(edge)
+    if not pts:
+        c = edge_center(edge)
+        return ((c[0] - x) ** 2 + (c[1] - y) ** 2 + (c[2] - z) ** 2) ** 0.5
+    if len(pts) == 1:
+        p = pts[0]
+        return ((p[0] - x) ** 2 + (p[1] - y) ** 2 + (p[2] - z) ** 2) ** 0.5
+    best = None
+    for i in range(1, len(pts)):
+        d = _seg_distance(pts[i - 1], pts[i], (x, y, z))
+        if best is None or d < best:
+            best = d
+    return best
+
+
+def edges_where(body, predicate):
+    """按条件挑边：predicate(center_mm, direction, kind, length_mm, edge) -> True/False。
+
+    direction 只对直线边有值（单位向量），曲边是 None；kind 见 edge_kind。
+    例：edges_where(body, lambda c, d, k, L, e: k == "circle" and L > 50)
+    """
+    out = []
+    for e in body.Edges:
+        if predicate(edge_center(e), edge_direction(e), edge_kind(e), edge_length(e), e):
+            out.append(e)
+    return out
+
+
+def edges_by_kind(body, kind):
+    """指定几何类型的边：edges_by_kind(body, "line") / ("circle") / ("ellipse")。"""
+    k = str(kind).lower()
+    return edges_where(body, lambda c, d, kk, L, e: kk == k)
+
+
+def _unit_vector(v):
+    if isinstance(v, (tuple, list)):
+        if len(v) != 3:
+            raise ValueError("direction tuple must have 3 components")
+        d = (float(v[0]), float(v[1]), float(v[2]))
+    else:
+        d = _dir_vector(v)
+    L = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) ** 0.5
+    if L <= 0.0:
+        raise ValueError("direction vector must not be zero")
+    return (d[0] / L, d[1] / L, d[2] / L)
+
+
+def edges_parallel(body, axis="z", tol=1e-3):
+    """与给定方向平行的直线边（正反都算）。
+
+    axis 可以是 "x"/"y"/"z" 或 (dx,dy,dz)。tol 是"1 - |cos|"的容差。
+    这是"四条竖边倒圆角"最常用的入口。
+    """
+    a = _unit_vector(axis)
+    return edges_where(body, lambda c, d, k, L, e:
+                       d is not None and abs(d[0] * a[0] + d[1] * a[1] + d[2] * a[2]) >= 1.0 - tol)
+
+
+def edges_perpendicular(body, axis="z", tol=1e-3):
+    """与给定方向垂直的直线边（"这个面四周的边"常用）。"""
+    a = _unit_vector(axis)
+    return edges_where(body, lambda c, d, k, L, e:
+                       d is not None and abs(d[0] * a[0] + d[1] * a[1] + d[2] * a[2]) <= tol)
+
+
+def edges_along_axis(body, axis="z", tol=1e-3):
+    """曲边的轴向与给定轴平行的边（"管口那一圈圆边"用这个）。"""
+    a = _unit_vector(axis)
+    out = []
+    for e in body.Edges:
+        ax = edge_axis(e)
+        if ax is None:
+            continue
+        if abs(ax[0] * a[0] + ax[1] * a[1] + ax[2] * a[2]) >= 1.0 - tol:
+            out.append(e)
+    return out
+
+
+def edges_at(body, axis="z", value=0.0, tol=1e-3):
+    """边心在指定轴坐标等于 value(mm) 的所有边。"""
+    i = _axis_index(axis)
+    return edges_where(body, lambda c, d, k, L, e: abs(c[i] - value) <= tol)
+
+
+def edges_between(body, axis="z", lo=None, hi=None, tol=1e-3):
+    """边心在指定轴坐标落在 [lo, hi] 区间内的边（单位 mm）。"""
+    i = _axis_index(axis)
+
+    def ok(c, d, k, L, e):
+        if lo is not None and c[i] < lo - tol:
+            return False
+        if hi is not None and c[i] > hi + tol:
+            return False
+        return True
+    return edges_where(body, ok)
+
+
+def edges_in_box(body, xmin=None, xmax=None, ymin=None, ymax=None,
+                 zmin=None, zmax=None, tol=1e-3):
+    """边心落在给定盒子里的边；某一维传 None 表示不限。"""
+    lo = (xmin, ymin, zmin)
+    hi = (xmax, ymax, zmax)
+
+    def ok(c, d, k, L, e):
+        for i in range(3):
+            if lo[i] is not None and c[i] < lo[i] - tol:
+                return False
+            if hi[i] is not None and c[i] > hi[i] + tol:
+                return False
+        return True
+    return edges_where(body, ok)
+
+
+def edges_by_length(body, min_length=None, max_length=None, tol=1e-6):
+    """按边长（mm）挑边。"""
+    def ok(c, d, k, L, e):
+        if min_length is not None and L < min_length - tol:
+            return False
+        if max_length is not None and L > max_length + tol:
+            return False
+        return True
+    return edges_where(body, ok)
+
+
+def edges_by_curvature(body, smooth=None, concave=None):
+    """按"相切软边 / 凹边"挑边；两个参数都传 None 就等于不过滤。"""
+    out = []
+    for e in body.Edges:
+        if smooth is not None and edge_is_smooth(e) != bool(smooth):
+            continue
+        if concave is not None and edge_is_concave(e) != bool(concave):
+            continue
+        out.append(e)
+    return out
+
+
+def edges_of_face(face):
+    """一张面的所有边界边。"""
+    try:
+        return list(face.Edges)
+    except:
+        return []
+
+
+def edges_of_faces(faces):
+    """一组面的边界边（去重）。"把这个面的四周倒圆"用这个。"""
+    if not isinstance(faces, (list, tuple)):
+        faces = [faces]
+    out = []
+    seen = {}
+    for f in faces:
+        for e in edges_of_face(f):
+            k = _edge_key(e)
+            if k in seen:
+                continue
+            seen[k] = 1
+            out.append(e)
+    return out
+
+
+def edges_at_point(body, x, y, z, tol=1e-3):
+    """经过给定点的边（按采样折线做线段距离，不是只看边心）。"""
+    out = []
+    for e in body.Edges:
+        if edge_distance_to_point(e, x, y, z) <= tol:
+            out.append(e)
+    return out
+
+
+def nearest_edge(body, x, y, z):
+    """离给定点最近的边（按到采样折线的距离）。"""
+    best = None
+    best_d = None
+    for e in body.Edges:
+        d = edge_distance_to_point(e, x, y, z)
+        if best_d is None or d < best_d:
+            best = e
+            best_d = d
+    return best
+
+
+def edge_summary(body):
+    """{边的几何类型: 条数, ..., "total": 总数}——倒角前后可以对一眼。"""
+    out = {"total": 0}
+    for e in body.Edges:
+        k = edge_kind(e)
+        out[k] = out.get(k, 0) + 1
+        out["total"] += 1
+    return out
+
+
+def match_edges(body, rule, exclude=None):
+    """按一条规则挑边。rule 是 dict，键可以任意组合（组合即取交集）：
+
+      parallel      : "x"/"y"/"z" 或 (dx,dy,dz) —— 直线边与它平行
+      perpendicular : "x"/"y"/"z" 或 (dx,dy,dz) —— 直线边与它垂直
+      axis          : "x"/"y"/"z" 或 (dx,dy,dz) —— 曲边自身的轴向（管口圆边圈）
+      kind          : "line" / "circle" / "ellipse" / ...
+      at            : (轴, 值)      —— 边心在该轴坐标等于该值
+      between       : (轴, lo, hi)  —— 边心在该轴坐标落在区间内
+      in_box        : (xmin,xmax,ymin,ymax,zmin,zmax)，某一维可为 None
+      length_min    : 边长下限 mm
+      length_max    : 边长上限 mm
+      point         : (x,y,z)       —— 经过该点的边
+      nearest       : (x,y,z)       —— 离该点最近的边
+      smooth        : True/False    —— 是否相切软边
+      concave       : True/False    —— 是否凹边
+      rest          : True          —— exclude 之后剩下的所有边
+      all           : True          —— 所有边
+      tol           : 位置容差 mm（默认 1e-3）
+
+    exclude 是"已经被前面的规则用掉"的边集合（{edge_key: 1}）。
+    """
+    tol = rule.get("tol", 1e-3)
+
+    point_keys = None
+    if "point" in rule:
+        p = rule["point"]
+        point_keys = {}
+        for e in edges_at_point(body, p[0], p[1], p[2], tol):
+            point_keys[_edge_key(e)] = 1
+
+    nearest_key = None
+    if "nearest" in rule:
+        p = rule["nearest"]
+        ne = nearest_edge(body, p[0], p[1], p[2])
+        nearest_key = _edge_key(ne) if ne is not None else None
+
+    par = _unit_vector(rule["parallel"]) if "parallel" in rule else None
+    perp = _unit_vector(rule["perpendicular"]) if "perpendicular" in rule else None
+    ax = _unit_vector(rule["axis"]) if "axis" in rule else None
+    kind = str(rule["kind"]).lower() if "kind" in rule else None
+    at_i = at_v = None
+    if "at" in rule:
+        at_i = _axis_index(rule["at"][0])
+        at_v = rule["at"][1]
+    bt_i = bt_lo = bt_hi = None
+    if "between" in rule:
+        bt_i = _axis_index(rule["between"][0])
+        bt_lo = rule["between"][1]
+        bt_hi = rule["between"][2]
+    box_lo = box_hi = None
+    if "in_box" in rule:
+        b = rule["in_box"]
+        box_lo = (b[0], b[2], b[4])
+        box_hi = (b[1], b[3], b[5])
+    len_min = rule.get("length_min")
+    len_max = rule.get("length_max")
+    want_smooth = rule.get("smooth")
+    want_concave = rule.get("concave")
+    plain_rest = bool(rule.get("rest"))
+    take_all = bool(rule.get("all"))
+
+    out = []
+    for e in body.Edges:
+        key = _edge_key(e)
+        if exclude is not None and key in exclude:
+            continue
+        if plain_rest or take_all:
+            out.append(e)
+            continue
+        c = edge_center(e)
+        if kind is not None and edge_kind(e) != kind:
+            continue
+        if at_i is not None and abs(c[at_i] - at_v) > tol:
+            continue
+        if bt_i is not None and (c[bt_i] < bt_lo - tol or c[bt_i] > bt_hi + tol):
+            continue
+        if box_lo is not None:
+            inside = True
+            for i in range(3):
+                if box_lo[i] is not None and c[i] < box_lo[i] - tol:
+                    inside = False
+                    break
+                if box_hi[i] is not None and c[i] > box_hi[i] + tol:
+                    inside = False
+                    break
+            if not inside:
+                continue
+        if par is not None or perp is not None or ax is not None:
+            d = edge_direction(e)
+            if par is not None:
+                if d is None:
+                    continue
+                if abs(d[0] * par[0] + d[1] * par[1] + d[2] * par[2]) < 1.0 - 1e-3:
+                    continue
+            if perp is not None:
+                if d is None:
+                    continue
+                if abs(d[0] * perp[0] + d[1] * perp[1] + d[2] * perp[2]) > 1e-3:
+                    continue
+            if ax is not None:
+                a = edge_axis(e)
+                if a is None:
+                    continue
+                if abs(a[0] * ax[0] + a[1] * ax[1] + a[2] * ax[2]) < 1.0 - 1e-3:
+                    continue
+        if len_min is not None or len_max is not None:
+            L = edge_length(e)
+            if len_min is not None and L < len_min - 1e-6:
+                continue
+            if len_max is not None and L > len_max + 1e-6:
+                continue
+        if want_smooth is not None and edge_is_smooth(e) != bool(want_smooth):
+            continue
+        if want_concave is not None and edge_is_concave(e) != bool(want_concave):
+            continue
+        if point_keys is not None and key not in point_keys:
+            continue
+        if nearest_key is not None and key != nearest_key:
+            continue
+        out.append(e)
+    return out
+
+
+def _model_signature():
+    """整个文档的几何指纹（体数 / 面数 / 总面积 mm^2）。"""
+    nb = 0
+    nf = 0
+    area = 0.0
+    for b in GetRootPart().Bodies:
+        nb += 1
+        for f in b.Faces:
+            nf += 1
+            try:
+                area += float(_shape_of(f).Area) * 1.0e6
+            except:
+                pass
+    return (nb, nf, round(area, 6))
+
+
+def _edge_list(target):
+    """把入参统一成 DesignEdge 列表：单条边 / 边的列表 / 一个体（= 它的所有边）。"""
+    if target is None:
+        raise ValueError("round/chamfer: no edge target given")
+    tn = type(target).__name__
+    if tn == "DesignEdge" or tn == "Edge":
+        return [target]
+    if tn == "DesignBody":
+        return list(target.Edges)
+    if isinstance(target, (list, tuple)):
+        return list(target)
+    if hasattr(target, "Edges"):
+        return list(target.Edges)
+    return list(target)
+
+
+def _apply_edges(tag, edges, apply_fn):
+    """真正执行倒角命令，并用几何指纹判定它到底动没动。"""
+    edges = list(edges)
+    if not edges:
+        raise ValueError(tag + ": the edge selection is empty")
+    before = _model_signature()
+    try:
+        apply_fn(edges)
+    except:
+        raise RuntimeError(_EDGE_FAIL_HINT)
+    after = _model_signature()
+    if before == after:
+        raise RuntimeError(tag + ": SpaceClaim reported success but the geometry did not "
+                                 "change (identical body/face count and total area)")
+    return len(edges)
+
+
+def round_edges(target, radius):
+    """倒圆角（fillet），返回提交的边数。
+
+    target: 一条 DesignEdge / DesignEdge 列表 / 一个体（= 该体所有边）
+    radius: mm
+
+    实测基线：20mm 立方体 12 条边 r=2 -> 面数 6 变 26
+    （6 平面 + 12 圆柱面 + 8 球角面）；只倒 4 条平行于 Z 的边 -> 面数 10。
+
+    注意：**只接受边**。传面（"把这个面倒圆"）会失败——那是
+    round_face_edges(face, r) 干的活（先取面的边界边）。
+    """
+    return _apply_edges("round_edges", _edge_list(target),
+                        lambda es: ConstantRound.Execute(
+                            Selection.Create(es), MM(float(radius)), None))
+
+
+def round_face_edges(faces, radius):
+    """把一组面的**边界边**倒圆角——"把这个面的四周倒圆"。
+
+    faces 可以是单张面、面列表，或 face_at_point 之类返回的面组。
+    """
+    return round_edges(edges_of_faces(faces), radius)
+
+
+def _rules_apply(body, rules, tol, is_chamfer):
+    applied = []
+    counts = {}
+    for i in range(len(rules)):
+        rule, value = rules[i]
+        r = dict(rule)
+        if "tol" not in r:
+            r["tol"] = tol
+        exclude = {}
+        for prev in applied:
+            for e in match_edges(body, prev):
+                exclude[_edge_key(e)] = 1
+        edges = match_edges(body, r, exclude=exclude)
+        counts[i] = len(edges)
+        if edges:
+            if is_chamfer:
+                if isinstance(value, (tuple, list)):
+                    chamfer_edges(edges, value[0], value[1])
+                else:
+                    chamfer_edges(edges, value)
+            else:
+                round_edges(edges, value)
+            applied.append(r)
+    return counts
+
+
+def round_by_rules(body, rules, tol=1e-3):
+    """按规则表批量倒圆角——边的版本，和 name_faces_by_rules 一个套路。
+
+    rules 是 (规则 dict, 半径 mm) 的列表，按顺序处理；先被用掉的边会被后面的规则排除。
+
+        round_by_rules(body, [
+            ({"parallel": "z"}, 2.0),     # 四条竖边 r=2
+            ({"kind": "circle"}, 0.5),    # 剩下的圆边 r=0.5
+            ({"rest": True}, 1.0),        # 再剩下的 r=1
+        ])
+
+    返回 {规则序号: 边数}。有两点要知道：
+
+    1. **每倒一次，体的边就换了一批**，所以每条规则都在"当前"体上重新枚举。
+    2. 因此前面规则的排除项也是**在当前体上重新判定**的：倒完竖边后会长出
+       新的切向直线边，`{"parallel": "z"}` 会连它们一起匹配上。规则表越长越要留神，
+       简单场景（一条规则、或"圆边 + rest"）不受影响。
+    """
+    return _rules_apply(body, rules, tol, False)
+
+
+def chamfer_by_rules(body, rules, tol=1e-3):
+    """按规则表批量倒角。rules 是 (规则 dict, 距离) 或 (规则 dict, (d1, d2))。"""
+    return _rules_apply(body, rules, tol, True)
+
+
+def chamfer_edges(target, distance, distance2=None):
+    """倒角（chamfer），返回提交的边数。
+
+    target: 一条 DesignEdge / DesignEdge 列表 / 一个体（= 该体所有边）
+    distance:  mm
+    distance2: 给了就是"两侧不等距倒角"（d1 在第一张相邻面上、d2 在另一张上）
+
+    实测基线：20mm 立方体 12 条边 d=2 -> 面数 6 变 26
+    （6 平面 + 12 斜面 + 8 三角面）；只倒 4 条平行于 Z 的边 -> 面数 10。
+    """
+    edges = _edge_list(target)
+    d1 = MM(float(distance))
+    if distance2 is None:
+        fn = lambda es: Chamfer.Execute(Selection.Create(es), d1, None, None)
+    else:
+        d2 = MM(float(distance2))
+        fn = lambda es: Chamfer.Execute(Selection.Create(es), d1, d2, None, None)
+    return _apply_edges("chamfer_edges", edges, fn)
+
+
+def round_vertical_edges(body, radius, axis="z"):
+    """只倒某一方向的立边——CFD 里最常见的"柱体竖边倒圆"写法。"""
+    return round_edges(edges_parallel(body, axis), radius)
+
+
+def round_outer_rims(body, radius, axis="z"):
+    """只倒轴向平行于 axis 的圆边圈（管口的两圈边）。"""
+    return round_edges(edges_along_axis(body, axis), radius)
+
+
+# ---------------------------------------------------------------------------
 # 命名选择（Named Selection）
 # ---------------------------------------------------------------------------
 
@@ -1507,8 +2160,8 @@ def finish(path, body=None):
     try:
         if body is not None:
             dx, dy, dz = body_size(body)
-            _safe_print("[size] %.3f x %.3f x %.3f mm, %d face(s)"
-                        % (dx, dy, dz, len(list(body.Faces))))
+            _safe_print("[size] %.3f x %.3f x %.3f mm, %d face(s), %d edge(s)"
+                        % (dx, dy, dz, len(list(body.Faces)), len(list(body.Edges))))
         for nm, cnt in group_summary():
             _safe_print("[named selection] %s -> %d face(s)" % (_ascii(nm), cnt))
     except:
