@@ -2197,19 +2197,35 @@ def _body_of(face):
 # ---------------------------------------------------------------------------
 
 def component(name, parent=None):
-    """建一个空组件（parent=None 建在根零件下），返回组件对象。
+    """建一个组件（parent=None 建在根零件下，否则建在那个组件里面），返回 **IComponent**。
 
-    实测：`CreateAtRoot("Asm", None)` 建出来的组件 `.Name` 是**空的**，
-    要用 `ComponentHelper.SetName(comp, name)` 才真正命名，所以这里补一次。
+    实测两件事：
+      * `CreateAtRoot` 出来的组件 `.Name` 是**空的**，`SetName` 返回 True 也读不回来，
+        所以名字只能自己记账（`assembly_summary()` 会显示 <unnamed>）。
+      * `CreateAtComponent` 返回的是 `ComponentCommandResult`，**不是** IComponent
+        （直接拿它当父级会 `TypeError: expected ISelection, got ComponentCommandResult`），
+        要从 `res.CreatedComponents[0]` 取。
     """
     ensure_document()
+    comp = None
     try:
         if parent is None:
             comp = ComponentHelper.CreateAtRoot(str(name), None)
         else:
-            comp = ComponentHelper.CreateAtComponent(parent, str(name), None)
+            res = ComponentHelper.CreateAtComponent(parent, str(name), None)
+            try:
+                if res.CreatedComponents.Count > 0:
+                    comp = res.CreatedComponents[0]
+            except:
+                comp = None
+            if comp is None:
+                kids = component_children(parent)
+                if kids:
+                    comp = kids[len(kids) - 1]
     except:
         raise RuntimeError("component: SpaceClaim refused to create the component")
+    if comp is None:
+        raise RuntimeError("component: the component did not appear")
     try:
         if not str(comp.Name):
             ComponentHelper.SetName(comp, str(name))
@@ -2278,7 +2294,7 @@ def explode_to_components(bodies):
 
 
 def components(part=None):
-    """根零件下（一层）的组件列表。"""
+    """根零件下（**一层**）的组件列表。要所有层级用 `all_components()`。"""
     if part is None:
         part = GetRootPart()
     out = []
@@ -2290,31 +2306,89 @@ def components(part=None):
     return out
 
 
-def component_bodies(comp):
-    """一个组件里的所有体。"""
+def component_children(comp):
+    """一个组件的**直接**子组件。"""
+    out = []
     try:
-        return list(comp.GetAllBodies())
+        for i in range(comp.Components.Count):
+            out.append(comp.Components[i])
+    except:
+        pass
+    return out
+
+
+def all_components(part=None):
+    """递归列出**所有层级**的组件（先根零件下的，再往里）。"""
+    if part is None:
+        part = GetRootPart()
+    queue = list(components(part))
+    out = []
+    while queue:
+        c = queue.pop(0)
+        out.append(c)
+        queue.extend(component_children(c))
+    return out
+
+
+def _direct_bodies(comp):
+    """只属于这个组件**自己**的体（不含子组件的）。"""
+    try:
+        return list(comp.GetBodies())
     except:
         try:
-            return list(comp.GetBodies())
+            return list(comp.GetAllBodies())
         except:
             return []
 
 
+def component_bodies(comp, deep=True):
+    """一个组件里的体；deep=True（默认）连子组件里的也算。
+
+    这里**自己走递归**，不依赖 `GetAllBodies()` 到底含不含子组件（实测没定论）。
+    按 Moniker 去重，所以嵌套再深也不会重复计数。
+    """
+    out = []
+    seen = {}
+
+    def walk(c):
+        for b in _direct_bodies(c):
+            k = _body_key(b)
+            if k not in seen:
+                seen[k] = 1
+                out.append(b)
+        for ch in component_children(c):
+            walk(ch)
+
+    if deep:
+        walk(comp)
+    else:
+        out.extend(_direct_bodies(comp))
+    return out
+
+
 def all_bodies():
-    """根零件下的体 + 所有组件里的体。
+    """根零件下的体 + **所有层级**组件里的体（按 Moniker 去重）。
 
     我们的命名/校验默认只看 `GetRootPart().Bodies`；文档里一旦用了组件，
     那些体就"消失"了，所以需要这个把两边都算上。
     """
     out = []
+    seen = {}
+
+    def push(b):
+        k = _body_key(b)
+        if k not in seen:
+            seen[k] = 1
+            out.append(b)
+
     try:
         for i in range(GetRootPart().Bodies.Count):
-            out.append(GetRootPart().Bodies[i])
+            push(GetRootPart().Bodies[i])
     except:
         pass
-    for c in components():
-        out.extend(component_bodies(c))
+    for c in all_components():
+        for b in _direct_bodies(c):
+            push(b)
     return out
 
 
@@ -2332,16 +2406,16 @@ def _as_body_list(bodies):
 
 
 def drop_empty_components(part=None):
-    """删掉空组件。
+    """删掉空组件（**递归**，含子组件）。
 
     实测：搬空之后的组件如果留在文档里，`NamedSelection.GetGroups()` 会抛
     **中文**的 SystemError（"未将对象引用设置到对象的实例"）——命名选择整个读不出来，
     而且旧版 `verify_model.py` 会把这种失败吞掉、照样报 OK。所以搬完体之后请调一次。
-    返回删掉的组件数。
+    返回删掉的组件数（按**所有层级**计）。
     """
     if part is None:
         part = GetRootPart()
-    before = len(components(part))
+    before = len(all_components(part))
     try:
         ComponentHelper.DeleteEmptyComponents(part, None)
     except:
@@ -2349,14 +2423,22 @@ def drop_empty_components(part=None):
             ComponentHelper.DeleteEmptyComponents(None)
         except:
             return 0
-    return before - len(components(part))
+    return before - len(all_components(part))
 
 
 def assembly_summary():
-    """当前文档的装配结构：[("(root)", 体数)] + 每个组件的 (名字, 体数)。"""
+    """当前文档的装配结构：[(名字, 体数), ...]，含**所有层级**，名字前按层数缩进。
+
+    第一项永远是 ("(root)", 根零件里的体数)。
+    """
     out = [("(root)", GetRootPart().Bodies.Count)]
-    for c in components():
-        out.append((_ascii(component_name(c)), len(component_bodies(c))))
+    queue = [(c, 1) for c in components()]
+    while queue:
+        c, depth = queue.pop(0)
+        nm = _ascii(component_name(c))
+        out.append((("  " * (depth - 1)) + nm, len(component_bodies(c, deep=False))))
+        for ch in component_children(c):
+            queue.append((ch, depth + 1))
     return out
 
 

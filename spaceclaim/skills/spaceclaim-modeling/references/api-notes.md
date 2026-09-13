@@ -1065,6 +1065,32 @@ IComponent.GetAllBodies() / GetBodies() / GetInstance() / GetInstanceName() / Ge
    实测：一个用例里搬完体留下 3 个空组件，随后 `group_summary()` 直接抛异常，
    命名选择整个读不出来。
 
+### 23.3b 嵌套组件（组件里还有组件）
+
+```
+ComponentHelper.CreateAtComponent(IComponent parent, String name, ICommandInfo)
+    -> ComponentCommandResult { CreatedComponents, CreatedBodies }
+```
+
+实测（根零件 7 个体；外层 Outer 放 1 个、内层 Inner 放 2 个）：
+
+| 调用 | 结果 |
+|---|---|
+| `CreateAtComponent(outer, "Inner", None)` 的返回类型 | **`ComponentCommandResult`**，不是 IComponent |
+| 拿它当父级用 | `TypeError: expected ISelection, got ComponentCommandResult` |
+| 从 `res.CreatedComponents[0]` 取 | 得到真正的子组件，类型名是 **`ComponentGeneral`**（顶层是 `Component`） |
+| `all_components()`（自己写的递归） | 2（外层 + 内层） |
+| `component_bodies(outer, deep=True)` | 3（外层自己的 1 + 内层的 2） |
+| `component_bodies(outer, deep=False)` | 1 |
+| `all_bodies()`（根零件 + 递归组件，按 Moniker 去重） | 10 = 7 + 3，无重复计数 |
+
+`IComponent.GetAllBodies()` 到底含不含**子组件**的体，实测**没有定论**：子组件为空时
+`GetAllBodies() == GetBodies()`，都等于直接子体数。所以库里的 `component_bodies()`
+是自己走递归 + 去重，不依赖它的语义。
+
+组件名字依然读不出来（`Name` / `GetInstanceName()` / `GetInstance().Name` 全空，
+`SetName` 返回 True 也没用），`assembly_summary()` 只能用 `<unnamed>`，并**按层数缩进**表示层级。
+
 ### 23.4 顺带修掉的一个验证漏洞
 
 上面第 4 条暴露出 `verify_model.py` 的一个真问题：它把整个校验体包在 `try/except` 里，

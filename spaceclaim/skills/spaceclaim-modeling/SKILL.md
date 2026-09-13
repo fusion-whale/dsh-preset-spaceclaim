@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `explode_to_components` / `assembly_summary` in §1h.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `all_components` / `component_children` / `explode_to_components` / `assembly_summary` in §1h.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -376,6 +376,32 @@ assembly_summary()                           # [('(root)', 7), ('Assembly1', 1),
 3. **组件里的体照样能 measure、挑面、`name_faces`**，但命名之后枚举 `NamedSelection.GetGroups()` 时脚本硬崩过一次。**推荐顺序：先 `move_to_root` 搬回根零件，再命名。**
 4. **搬动过的旧包装对象会失效**，跨组件操作后请按名字重新取体（`selftest_surface_asm.py` 里的 `body_named()` 就是这个用途）。
 5. **搬空之后的组件必须 `drop_empty_components()` 删掉。** 留着空组件在文档里，`NamedSelection.GetGroups()` 会抛**中文** SystemError（"未将对象引用设置到对象的实例"）——命名选择整个读不出来。`_copy_body`/`verify` 都靠它，所以这是个会连锁的坑。
+6. **嵌套组件（组件里还有组件）是支持的**，`all_bodies()` / `all_components()` / `component_bodies()` 都会**递归**。
+
+### 嵌套组件
+
+```python
+outer = component("Outer")
+inner = component("Inner", parent=outer)      # 建在 Outer 里面
+move_to_component(body, inner)                # 体放到最里层
+all_components()                              # 所有层级：2 个（外层 + 内层）
+component_bodies(outer, deep=True)            # 3 个（外层自己的 1 + 内层的 2）
+component_bodies(outer, deep=False)           # 1 个（只算外层自己的）
+all_bodies()                                  # 根零件 + 所有层级，按 Moniker 去重
+assembly_summary()                            # [('(root)', 7), ('<unnamed>', 1), ('  <unnamed>', 2)]
+```
+
+实测（根零件 7 个体 + 外层放 1 个 + 内层放 2 个）：`all_components()` = 2、
+`component_bodies(outer, deep=True)` = 3、`deep=False` = 1、`all_bodies()` = 10（正好 7+3，没有重复计数）。
+
+两个要注意的点：
+
+- **`CreateAtComponent` 返回的不是组件对象**，而是 `ComponentCommandResult`。直接拿它当父级用会
+  `TypeError: expected ISelection, got ComponentCommandResult`；要从 `res.CreatedComponents[0]` 取。
+  `component()` 已经包好了这件事。
+- 子组件的 Python 类型名是 `ComponentGeneral`（顶层是 `Component`），当**父级**用没问题。
+- `GetAllBodies()` 到底含不含子组件的体，实测**没有定论**（子组件为空时看不出差别），所以
+  `component_bodies()` 是自己走递归的，不依赖它。
 
 `verify_model.py` 也改成同时列出根零件和每个组件里的体，并打印 `assembly=...` 结构。
 

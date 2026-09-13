@@ -135,7 +135,36 @@ dropped = drop_empty_components()
 print("[x] drop_empty_components -> 删掉 %d 个空组件，现在 %s"
       % (dropped, str(assembly_summary())))
 
-# --- 8) 失败路径 --------------------------------------------------------
+# --- 8) 嵌套组件：两层，体在最里面 --------------------------------------
+n1 = box(10.0, 10.0, 10.0, origin=(400.0, 0.0, 0.0), name="DeepA")
+n2 = box(10.0, 10.0, 10.0, origin=(420.0, 0.0, 0.0), name="DeepB")
+n3 = box(10.0, 10.0, 10.0, origin=(440.0, 0.0, 0.0), name="Shallow")
+outer = component("Outer")
+inner = component("Inner", parent=outer)       # 建在 Outer 里面
+print("[x] nested: outer=%s inner=%s" % (type(outer).__name__, type(inner).__name__))
+move_to_component(n1, inner)                   # 体放到最里层
+move_to_component(n2, inner)
+move_to_component(n3, outer)                   # 体放在外层
+print("[x] nested assembly: %s" % str(assembly_summary()))
+print("[x] all_components() = %d（外层 + 内层）" % len(all_components()))
+print("[x] component_bodies(outer, deep=True)  = %d 个体: %s"
+      % (len(component_bodies(outer, deep=True)),
+         str([_ascii(b.Name) for b in component_bodies(outer, deep=True)])))
+print("[x] component_bodies(outer, deep=False) = %d 个体（只有外层自己的）"
+      % len(component_bodies(outer, deep=False)))
+print("[x] component_bodies(inner)              = %d 个体"
+      % len(component_bodies(inner)))
+print("[x] root Bodies=%d, all_bodies()=%d（根零件 + 两层组件里的）"
+      % (GetRootPart().Bodies.Count, len(all_bodies())))
+
+# 从最里层搬回根零件，再把两层组件都删掉
+deep = component_bodies(outer, deep=True)
+move_to_root(deep)
+dropped2 = drop_empty_components()
+print("[x] 搬回并删掉 %d 个空组件后：root Bodies=%d, %s"
+      % (dropped2, GetRootPart().Bodies.Count, str(assembly_summary())))
+
+# --- 9) 失败路径 --------------------------------------------------------
 msg = "none"
 try:
     thicken(s1, 0.0)
