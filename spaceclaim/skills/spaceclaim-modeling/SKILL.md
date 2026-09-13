@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `explode_to_components` / `assembly_summary` in §1h.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -332,6 +332,57 @@ name_faces_by_rules(domain, [
 
 实测结果：15 个面 = 6 张平面 + 9 张管壁；inlet/outlet 各 1200 mm²、管壁 9 × 565.49 = 2π·3·30、上下壁各 2145.53 = 2400 − 9·π·3²。
 
+## 1h. 曲面（零厚度面体）+ 加厚 / 装配（组件）
+
+**曲面 → 加厚**（薄板、挡板、baffle）：
+
+```python
+plate  = rect_surface(30.0, 20.0, origin=(0,0,0), normal="y", name="Baffle")  # 一张矩形面
+plate  = thicken(plate, 1.0, direction="y")                                  # 加厚成 1mm 薄板
+disc   = circle_surface(10.0, center=(0,0,0), normal="z")                    # 圆面
+pulled = thicken(faces_by_normal(solid, "z", 1)[0], 5.0, direction="z")      # 实体的面也能"拉"
+```
+
+| 实测 | 结果 |
+|---|---|
+| `rect_surface(20, 10)` | 1 个体、**1 个面**、面积 200.00、包围盒 20×10×**0**（零厚度） |
+| `circle_surface(10)` | 1 个面、面积 314.159 = π·10² |
+| 20×10 面 +Z 2mm | 1 个体 6 个面、包围盒 20×10×2、总面积 520 = 2×200 + 2×20×2 + 2×10×2 |
+| 40×40 面、`symmetric=True`、value=4 | 包围盒 Z 从 **−4 到 +4**（总厚 8），总面积 4480 |
+
+三条要注意：
+
+1. **`symmetric=True` 的总厚度是 value 的两倍**（两侧各拉 value），别按"总厚 = value"去算。
+2. **`thicken` 给曲面加厚会替换掉原来那个面体**，旧对象随即失效（拿它取 `Faces` 会抛 `The object is deleted.`）。所以**必须用返回值**：`plate = thicken(plate, 1.0, direction="y")`。给**实体的面**加厚则是原地改（20³ 的顶面 +Z 5mm → 整体长到 25），返回原对象。
+3. **`Midsurface.Convert(body, 厚度, None)` 实测是个空操作**：返回 `Success=True`，但 40×40×4 的板纹丝不动（还是 6 个面 3840 mm²）。中面提取在这个版本用不了。
+
+**装配（组件）**：
+
+```python
+asm = component("Assembly1")                 # 建组件（名字见下面的坑）
+move_to_component(body, asm)                 # 体搬进组件
+move_to_root(component_bodies(asm))          # 搬回根零件
+comps = explode_to_components(bodies)        # 每个体单独一个组件
+all_bodies()                                 # 根零件 + 所有组件里的体
+assembly_summary()                           # [('(root)', 7), ('Assembly1', 1), ...]
+```
+
+**核心行为：体一进组件，`GetRootPart().Bodies` 就再也看不到它了。** 实测 2 个体搬 1 个进组件后，根零件 `Bodies` 2→1、`Components` 0→1，那个体只能从 `comp.GetAllBodies()` 拿到（和 §1g 里官方 Pattern 的表现是同一个坑）。所以库里加了 `all_bodies()`，`_model_signature()` 也改成用它——否则"几何指纹"会假报"没变化"。
+
+四条实测结论：
+
+1. **搬回根零件只有一条路**：`ComponentHelper.MoveBodiesToComponent(体, GetRootPart(), False, None)`（传 `IPart` 的重载）。`ComponentHelper.FlattenAssembly(...)` 实测**是空操作** —— 选组件、选根零件都返回 `Success=True`，体纹丝不动。
+2. **组件的名字读不出来。** `CreateAtRoot("Asm")` 之后 `comp.Name` 是空字符串；`ComponentHelper.SetName(comp, "Asm")` 返回 `True`，但 `Name` 和 `GetInstanceName()` 依旧是空的。所以 `assembly_summary()` 里会显示 `<unnamed>` —— 组件的**结构**可用，**名字**在这个版本不可靠。
+3. **组件里的体照样能 measure、挑面、`name_faces`**，但命名之后枚举 `NamedSelection.GetGroups()` 时脚本硬崩过一次。**推荐顺序：先 `move_to_root` 搬回根零件，再命名。**
+4. **搬动过的旧包装对象会失效**，跨组件操作后请按名字重新取体（`selftest_surface_asm.py` 里的 `body_named()` 就是这个用途）。
+5. **搬空之后的组件必须 `drop_empty_components()` 删掉。** 留着空组件在文档里，`NamedSelection.GetGroups()` 会抛**中文** SystemError（"未将对象引用设置到对象的实例"）——命名选择整个读不出来。`_copy_body`/`verify` 都靠它，所以这是个会连锁的坑。
+
+`verify_model.py` 也改成同时列出根零件和每个组件里的体，并打印 `assembly=...` 结构。
+
+### verify 的失败哨兵（重要）
+
+`verify_model.py` 现在**失败时会打 `<<<SCDM_VERIFY_FAILED>>>` 而不是 OK**，运行器据此报错。老版本无论如何都打 OK，于是 `group_summary()` 抛异常会被静默吞掉 —— 校验看着是绿的、实际上根本没读到命名选择。这个洞是 §1h 的空组件问题暴露出来的。
+
 ## 2. Run it
 
 ```powershell
@@ -412,9 +463,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_elbow.py"         -Out "$S\tests\selftest_elbow.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_shell.py"         -Out "$S\tests\selftest_shell.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_array.py"         -Out "$S\tests\selftest_array.scdocx"         -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_surface_asm.py"   -Out "$S\tests\selftest_surface_asm.scdocx"   -Verify
 ```
 
-All eighteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All nineteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -436,6 +488,7 @@ All eighteen must end in `[scdm] status=ok` and print the verify block. Regressi
 | `selftest_elbow` | 3 bodies: `Bend 44×44×6.009` (7 faces) · `Elbow45 4×12.021×7.808` (3) · `UTurn 28×14×4` (3) | Bend: inlet 28.27 @ (0,-21,0) · outlet 28.27 @ (-41,20,0) · bend_wall 573.89 · wall 4 faces (405.27 / 405.27 / 0.13 / 0.13) · Elbow45: e45_inlet 12.57 @ (0,60,0) · e45_wall 148.04 · e45_outlet 12.57 · UTurn: uturn_inlet 12.57 @ (0,120,0) · uturn_wall 473.74 · uturn_outlet 12.57 @ (-24,120,0) |
 | `selftest_shell` | 7 bodies: `HollowCube 20³` (12 faces) · `OpenCup 20³` (11) · `OpenDuct 20³` (10) · `HollowCyl 20×20×20` (6 — 4 plane + 2 cylinder) · `Outward 24³` (12) · `TooThick 20³` (6 — t=11 refused, untouched) · `PreNamed 20³` (11) | hollow_outer 6 × 400.00 · hollow_cavity 6 × 256.00 @ ±2 · cup_rim 144.00 @ (50,10,20) · cup_outer 5 × 400.00 · cup_inner 5 面 · duct_rim/duct_rim2 各 144.00 @ z=20/z=0 · duct_outer 4 × 400.00 · duct_inner 4 × 320.00 · pre_outlet 被重映射成 144.00 |
 | `selftest_array` | 22 bodies: `Pin_1..4` (各 6 面) · `Fin_1..6` (6) · `Blade_1..6` (6) · `Half` (合并后 1 体 20×10×10) · `Half2` + `Half2Mirror` · `BankDomain 60×40×30` (**15 面**) | bank_inlet/bank_outlet 各 1200.00 @ (700,20,15)/(760,20,15) · bank_tubes **9 × 565.49** @ 706/718/730 × 6/18/30 · bank_wall 4 面（1800 / 1800 / 2145.53 / 2145.53） |
+| `selftest_surface_asm` | 7 bodies: `RectSurf 20×10×2` (6 面) · `CircSurf 20×20×0` (**1 面**) · `SymSurf 40×40×8` (6) · `PullMe 20×20×25` (6) · `Baffle 30×1×20` (6) · `CompA` · `CompB` (各 6) | baffle_a/baffle_b 各 150.00（30×5? 见 verify）· baffle_edge 4 面 |
 
 Run these before blaming a new model script.
 

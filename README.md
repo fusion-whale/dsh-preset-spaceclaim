@@ -1,6 +1,6 @@
 # dsh-preset-spaceclaim
 
-**给 DeepSeek Harness（DSH）加一个「SpaceClaim 建模」预设**：装上之后，任何人的 DSH 会话都能按你的要求建 SpaceClaim 几何、倒圆角/倒角、做真圆截面弯头、抽壳、阵列/镜像（管束、针翅、叶片排）、命名边界（`inlet` / `outlet` / `wall` / `interface` / `baffle`…），而且每一步都有独立校验。
+**给 DeepSeek Harness（DSH）加一个「SpaceClaim 建模」预设**：装上之后，任何人的 DSH 会话都能按你的要求建 SpaceClaim 几何、倒圆角/倒角、做真圆截面弯头、抽壳、阵列/镜像（管束、针翅、叶片排）、曲面加厚、装配组件、命名边界（`inlet` / `outlet` / `wall` / `interface` / `baffle`…），而且每一步都有独立校验。
 
 > Give the DeepSeek Harness an agent preset that can build Ansys SpaceClaim geometry and name its boundary zones from a plain-language request. Docs are in Chinese.
 
@@ -117,7 +117,7 @@ spaceclaim/                        ← 预设包本体（install.ps1 复制这�
 │   ├── package.json
 │   ├── lib/index.js               注册 scdm_build
 │   └── scripts/                   运行器 + 建模库 + 校验脚本（自包含副本）
-└── skills/spaceclaim-modeling/    技能：SKILL.md + 参考文档 + 18 个回归用例
+└── skills/spaceclaim-modeling/    技能：SKILL.md + 参考文档 + 19 个回归用例
 test/smoke.mjs                     冒烟测试（--live 会真跑一次建模）
 ```
 

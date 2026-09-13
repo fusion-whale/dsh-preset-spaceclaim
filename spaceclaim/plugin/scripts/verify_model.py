@@ -9,26 +9,37 @@
 
 import traceback
 
+_verify_ok = True
+
 try:
     DocumentOpen.Execute(SCDM_VERIFY_TARGET)
     part = GetRootPart()
 
     print("[verify] file: " + str(SCDM_VERIFY_TARGET))
     print("[verify] bodies = %d" % part.Bodies.Count)
+    print("[verify] assembly = %s" % str(assembly_summary()))
 
-    for bi in range(part.Bodies.Count):
-        body = part.Bodies[bi]
-        _safe_print("[verify] body[%d] name=%s faces=%d"
-                    % (bi, _ascii(body.Name), len(list(body.Faces))))
+    def dump(prefix, bi, body):
+        _safe_print("[verify] %s name=%s faces=%d"
+                    % (prefix, _ascii(body.Name), len(list(body.Faces))))
         dx, dy, dz = body_size(body)
-        print("[verify] body[%d] size = %.3f x %.3f x %.3f mm" % (bi, dx, dy, dz))
+        print("[verify] %s size = %.3f x %.3f x %.3f mm" % (prefix, dx, dy, dz))
         es = list(body.Edges)
         ek = {}
         for e in es:
             k = edge_kind(e)
             ek[k] = ek.get(k, 0) + 1
-        print("[verify] body[%d] edges = %d %s"
-              % (bi, len(es), str(sorted(ek.items()))))
+        print("[verify] %s edges = %d %s" % (prefix, len(es), str(sorted(ek.items()))))
+
+    for bi in range(part.Bodies.Count):
+        dump("body[%d]" % bi, bi, part.Bodies[bi])
+
+    # 组件里的体（GetRootPart().Bodies 看不到它们）
+    for ci in range(len(components(part))):
+        bodies = component_bodies(components(part)[ci])
+        print("[verify] comp[%d] bodies=%d" % (ci, len(bodies)))
+        for bi in range(len(bodies)):
+            dump("comp[%d].body[%d]" % (ci, bi), bi, bodies[bi])
 
     groups = group_summary()
     print("[verify] named selections = %d" % len(groups))
@@ -44,5 +55,12 @@ try:
 except:
     print("!!! VERIFY EXCEPTION !!!")
     print(traceback.format_exc())
+    _verify_ok = False
 
-print("<<<SCDM_VERIFY_OK>>>")
+# 关键：**失败时不要打成功哨兵**。老版本无论如何都打 <<<SCDM_VERIFY_OK>>>，
+# 于是 group_summary / NamedSelection.GetGroups() 抛异常（比如文档里留着空组件时抛
+# 中文 SystemError）会被静默吞掉，校验看着是绿的、实际上根本没读到命名选择。
+if _verify_ok:
+    print("<<<SCDM_VERIFY_OK>>>")
+else:
+    print("<<<SCDM_VERIFY_FAILED>>>")

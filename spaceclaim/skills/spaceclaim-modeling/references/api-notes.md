@@ -984,6 +984,107 @@ MirrorOptions : MergeObjects / CreateRelationships
 | 6³ 叶片半径 20、绕 Z 整圈 6 个 | 6 体、36 面、1296 mm²（旋转过的包围盒变成 8.196×8.196×6，正常） |
 | 管束流域 60×40×30 + 3×3 根 r=3 贯穿管 | 15 面 = 6 平面 + 9 管壁；inlet/outlet 各 1200；管壁各 565.49 = 2π·3·30；上下壁各 2145.53 = 2400 − 9π·3² |
 
+## 23. 曲面与装配（第 19 个回归用例）
+
+### 23.1 曲面（零厚度面体）
+
+```
+RectangularSurface.Create(Double width, Double height, Nullable<Point> origin)   -> RectangularSurfaceResult
+CircularSurface.Create(Double radius, Direction zDir, Nullable<Point> origin)    -> CircularSurfaceResult
+```
+
+| 实测 | 结果 |
+|---|---|
+| `RectangularSurface.Create(20, 10, origin)` | 1 个体、**1 个面**（kind=plane）、面积 200.00、包围盒 20×10×**0** |
+| `CircularSurface.Create(10, (0,0,1), origin)` | 1 个面、面积 314.159 = π·10² |
+
+面体是真正的零厚度体，`GetRootPart().Bodies` 能看到它，也能 `face_center` / `face_area`，
+但**不能** `name_faces` 之后当边界用（它没有体积）；要当薄板/挡板得先加厚。
+
+### 23.2 加厚
+
+```
+ThickenFaces.Execute(ISelection faces, Direction dir, Double value,
+                     ThickenFaceOptions options, ICommandInfo info)
+ThickenFaceOptions : PullSymmetric / ExtrudeType / SelectDirection
+```
+
+| 情形 | 结果 |
+|---|---|
+| 20×10 面、+Z、2mm | 1 个体 6 个面、包围盒 20×10×2、总面积 520 = 2×200 + 2×20×2 + 2×10×2 |
+| 40×40 面、+Z、value=4、`PullSymmetric=True` | 包围盒 Z 从 **−4 到 +4**（**总厚 8**）、总面积 4480 |
+| 20³ **实体**的顶面、+Z、5mm | 整体长到 Z 0..25、仍 6 个面（就是把那张面"拉"出来） |
+
+两个坑：
+
+1. **`PullSymmetric=True` 的总厚度是 value 的两倍**（两侧各拉 value）。
+2. **给曲面加厚会"替换"原来那个面体**，旧对象随即失效——再拿它取 `.Faces` 会抛
+   `The object is deleted.`（库里一开始就踩了：加厚后 `dump(s1)` 直接让脚本中止）。
+   加厚出来的新体还会丢掉原来的名字（变回本地化的默认名），`thicken()` 里已经补回去了。
+
+`Midsurface.Convert(body, 厚度, None)` **实测是空操作**：返回 `Success=True`，但 40×40×4 的板
+纹丝不动（还是 6 个面 3840 mm²）。中面提取在这个版本用不了。
+
+### 23.3 装配：组件
+
+```
+ComponentHelper.CreateAtRoot(String name, ICommandInfo info)                    -> IComponent
+ComponentHelper.CreateAtComponent(IComponent parent, String name, ICommandInfo) -> ComponentCommandResult
+ComponentHelper.MoveBodiesToComponent(ISelection, IComponent, Boolean copy, ICommandInfo) -> ComponentCommandResult
+ComponentHelper.MoveBodiesToComponent(ISelection, IPart,     Boolean copy, ICommandInfo) -> Boolean
+ComponentHelper.CreateSeparateComponents(ISelection, ICommandInfo)
+ComponentHelper.SetName(IComponent, String) / SetSuffixName / CopyToRoot / FlattenAssembly
+ComponentHelper.DeleteEmptyComponents(IDocObject, ICommandInfo) / DeleteEmptyComponents(ICommandInfo)
+IComponent.GetAllBodies() / GetBodies() / GetInstance() / GetInstanceName() / GetOccurrence()
+```
+
+**体一进组件，`GetRootPart().Bodies` 就再也看不到它了。** 实测 2 个体搬 1 个进去：
+
+| | 搬之前 | 搬之后 |
+|---|---|---|
+| 根零件 `Bodies.Count` | 2 | **1** |
+| `Components.Count` | 0 | **1** |
+| `comp.GetAllBodies().Count` | — | **1**（就是那个体） |
+
+这和 §22.1 官方 Pattern 的表现是同一个坑。库里的 `all_bodies()` 把两边都算上，
+`_model_signature()` 也改用它——否则几何指纹会假报"没变化"。
+
+四条实测结论：
+
+1. **搬回根零件只有一条路**：`MoveBodiesToComponent(体, GetRootPart(), False, None)`
+   （传 `IPart` 的重载，返回 `Boolean`）。实测搬完 `Bodies.Count` 从 1 回到 2。
+   `ComponentHelper.FlattenAssembly(...)` **是空操作**：选组件、选根零件都返回 `Success=True`，
+   体纹丝不动。
+2. **组件的名字读不出来**：`CreateAtRoot("Asm")` 之后 `comp.Name` 是空串；
+   `SetName(comp, "Asm")` 返回 `True`，但 `Name` 和 `GetInstanceName()` **依旧是空的**。
+   结构可用、名字不可靠，`assembly_summary()` 里显示 `<unnamed>`。
+3. **组件里的体照样能 measure、挑面、`name_faces`**，但命名之后枚举
+   `NamedSelection.GetGroups()` 时脚本硬崩过一次。推荐顺序：**先搬回根零件，再命名**。
+4. **搬空之后的组件必须删掉**（`DeleteEmptyComponents`）。留着空组件，
+   `NamedSelection.GetGroups()` 会抛**中文** SystemError（"未将对象引用设置到对象的实例"）。
+   实测：一个用例里搬完体留下 3 个空组件，随后 `group_summary()` 直接抛异常，
+   命名选择整个读不出来。
+
+### 23.4 顺带修掉的一个验证漏洞
+
+上面第 4 条暴露出 `verify_model.py` 的一个真问题：它把整个校验体包在 `try/except` 里，
+**无论成功失败都打 `<<<SCDM_VERIFY_OK>>>`**。于是 `group_summary()` 抛异常时，
+校验看着是绿的、实际上根本没读到命名选择，而运行器只看哨兵，照样报 `status=ok`。
+
+现在改成失败时打 `<<<SCDM_VERIFY_FAILED>>>`，运行器的 `if ($vlog -notmatch '<<<SCDM_VERIFY_OK>>>')`
+就能把它判成失败。
+
+### 23.5 实测基线（第 19 个用例）
+
+| 对象 | 拓扑 |
+|---|---|
+| `RectSurf`（20×10 面 +Z 加厚 2） | 6 面、面积 520.00、包围盒 20×10×2 |
+| `CircSurf`（圆形面 r=10） | **1 面**、面积 314.159、包围盒 20×20×0 |
+| `SymSurf`（40×40 面 对称 4） | 6 面、面积 4480.00、包围盒 40×40×**8**、Z −4..4 |
+| `PullMe`（20³ 顶面 +Z 5） | 6 面、包围盒 20×20×**25** |
+| `Baffle`（30×20 面 normal=y，加厚 1） | 6 面、包围盒 30×**1**×20 |
+| 装配 | 1 体进组件 → 根零件 7→6、组件 1 体；搬回 → 根零件 7；explode → 3 个组件；展平 → 根零件 7 |
+
 
 
 

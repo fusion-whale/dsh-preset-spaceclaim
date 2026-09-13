@@ -1573,11 +1573,15 @@ def match_edges(body, rule, exclude=None):
 
 
 def _model_signature():
-    """整个文档的几何指纹（体数 / 面数 / 总面积 mm^2）。"""
+    """整个文档的几何指纹（体数 / 面数 / 总面积 mm^2）。
+
+    用 all_bodies()：文档里一旦有组件，`GetRootPart().Bodies` 会漏掉组件里的体，
+    指纹就会假报"没变化"。没有组件时行为和以前完全一样。
+    """
     nb = 0
     nf = 0
     area = 0.0
-    for b in GetRootPart().Bodies:
+    for b in all_bodies():
         nb += 1
         for f in b.Faces:
             nf += 1
@@ -2005,6 +2009,354 @@ def mirror(body, plane_face, merge=True, name=None):
             out[1].Name = name
         except:
             pass
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 曲面（零厚度的面体）与加厚
+#
+# 官方命令，本机 2022 R1 实测可用：
+#   RectangularSurface.Create(Double width, Double height, Nullable<Point> origin)
+#   CircularSurface.Create(Double radius, Direction zDir, Nullable<Point> origin)
+#   ThickenFaces.Execute(ISelection faces, Direction dir, Double value,
+#                        ThickenFaceOptions options, ICommandInfo info)
+#   ThickenFaceOptions : PullSymmetric / ExtrudeType / SelectDirection
+#
+# 实测要点：
+#   * 曲面体是**零厚度**的：`RectangularSurface.Create(20, 10)` -> 1 个体 1 个面、
+#     平面、面积 200 mm²、包围盒 20x10x0。`CircularSurface.Create(r=10)` -> 面积
+#     314.159 = pi*10^2。
+#   * `ThickenFaces` 把它加厚成实体：20x10 的面、+Z 2mm -> 1 个体 6 个面、
+#     包围盒 20x10x2、总面积 520 = 2x200 + 2x(20x2) + 2x(10x2)。
+#   * **`PullSymmetric = True` 时总厚度是 value 的两倍**：40x40 的面、value=4、
+#     对称 -> 包围盒 Z 从 -4 到 +4（厚 8），而不是 4。
+#   * `ThickenFaces` 作用在**实体的面**上就是"拉伸/偏移那张面"：
+#     20³ 实体的顶面 +Z 5mm -> 整体长高到 25，仍然是 6 个面。
+#   * `Midsurface.Convert(body, 厚度, None)` 实测返回 Success=True 但几何**毫无变化**
+#     （40x40x4 的板仍是 6 个面 3840 mm²），别指望它。
+# ---------------------------------------------------------------------------
+
+def rect_surface(width, height, origin=(0.0, 0.0, 0.0), normal="z", name="Surface"):
+    """一张矩形曲面（零厚度面体），返回体对象。
+
+    默认躺在 XY 平面（法向 Z）；normal 给 "x"/"y" 时把它摆成法向朝那个轴。
+    实测：20x10 -> 1 个体、1 个面、面积 200 mm²、包围盒 20x10x0。
+    """
+    ensure_document()
+    p = Point.Create(MM(origin[0]), MM(origin[1]), MM(origin[2]))
+    before = _snapshot_bodies()
+    try:
+        RectangularSurface.Create(MM(float(width)), MM(float(height)), p)
+    except:
+        raise RuntimeError("rect_surface: SpaceClaim refused to create the surface")
+    body = _created_body(None, before)
+    if body is None:
+        raise RuntimeError("rect_surface: no surface body appeared")
+    n = str(normal).lower()
+    if n == "x":
+        rotate(body, 90.0, axis="y")
+    elif n == "y":
+        rotate(body, -90.0, axis="x")
+    elif n != "z":
+        raise ValueError("rect_surface: normal must be 'x'/'y'/'z'")
+    if name:
+        try:
+            body.Name = name
+        except:
+            pass
+    return body
+
+
+def circle_surface(radius, center=(0.0, 0.0, 0.0), normal="z", name="Surface"):
+    """一张圆形曲面（零厚度面体）。实测 r=10 -> 1 个面、面积 314.159 mm²。"""
+    ensure_document()
+    d = _dir_vector(normal)
+    p = Point.Create(MM(center[0]), MM(center[1]), MM(center[2]))
+    before = _snapshot_bodies()
+    try:
+        CircularSurface.Create(MM(float(radius)),
+                               Direction.Create(d[0], d[1], d[2]), p)
+    except:
+        raise RuntimeError("circle_surface: SpaceClaim refused to create the surface")
+    body = _created_body(None, before)
+    if body is None:
+        raise RuntimeError("circle_surface: no surface body appeared")
+    if name:
+        try:
+            body.Name = name
+        except:
+            pass
+    return body
+
+
+def thicken(target, value, direction="z", symmetric=False, name=None):
+    """把曲面（或实体的面）加厚 / 拉伸，返回**可用的体对象**。
+
+    target     曲面体、一张面，或面的列表
+    value      厚度 / 拉伸量，单位 mm，必须 > 0
+    direction  往哪个方向拉："x"/"y"/"z" 或 (dx,dy,dz)（给元组就能指定负方向）
+    symmetric  True 时**两侧各拉 value**，总厚度 2*value（实测 40x40、value=4
+               -> 包围盒 Z 从 -4 到 +4）
+
+    实测：20x10 的矩形曲面 +Z 2mm -> 1 个体 6 个面、包围盒 20x10x2、总面积 520。
+
+    **注意返回值**：给**曲面体**加厚时，SpaceClaim 会把原来那个面体**替换**掉，
+    旧的体对象随即失效（拿它取 `Faces` 会抛 "The object is deleted."）。
+    所以这里返回的是重新取到的新体；给**实体的面**加厚则是原地改（实测 20³ 的
+    顶面 +Z 5 会让整体长到 25），此时返回原对象。
+    """
+    v = float(value)
+    if v <= 0.0:
+        raise ValueError("thicken: value must be > 0 mm")
+    if isinstance(target, (list, tuple)):
+        faces = list(target)
+    elif _is_body(target):
+        faces = list(target.Faces)
+    else:
+        faces = [target]
+    if not faces:
+        raise ValueError("thicken: no face to thicken")
+    d = _unit_vector(direction)
+    opts = ThickenFaceOptions()
+    opts.PullSymmetric = bool(symmetric)
+    old_name = None
+    if _is_body(target):
+        try:
+            old_name = target.Name
+        except:
+            old_name = None
+    snap = _snapshot_bodies()
+    before = _model_signature()
+    try:
+        ThickenFaces.Execute(Selection.Create(faces),
+                             Direction.Create(d[0], d[1], d[2]), MM(v), opts, None)
+    except:
+        raise RuntimeError("thicken failed: SpaceClaim refused to thicken this face")
+    after = _model_signature()
+    if before == after:
+        raise RuntimeError("thicken: SpaceClaim reported success but the geometry did not change")
+    new_body = _created_body(None, snap)
+    out = new_body if new_body is not None else target
+    # 替换出来的新体会丢掉原来的名字，这里补回去（否则会变成本地化的默认名）
+    if name is None and old_name is not None and new_body is not None:
+        try:
+            out.Name = old_name
+        except:
+            pass
+    if name is not None:
+        try:
+            out.Name = name
+        except:
+            pass
+    return out
+
+
+def _is_body(obj):
+    """obj 是不是一个体（而不是面/边）。"""
+    tn = type(obj).__name__
+    if tn in ("DesignBody", "Body", "SurfaceBody"):
+        return True
+    if tn in ("DesignFace", "DesignEdge", "DesignCurve"):
+        return False
+    return hasattr(obj, "Faces") and hasattr(obj, "Edges")
+
+
+def _body_of(face):
+    """面所属的体（DesignFace.Body）。"""
+    try:
+        return face.Body
+    except:
+        try:
+            return _shape_of(face).Body
+        except:
+            return None
+
+
+# ---------------------------------------------------------------------------
+# 装配：组件（Component）
+#
+# 官方命令，本机 2022 R1 实测可用：
+#   ComponentHelper.CreateAtRoot(String name, ICommandInfo info)
+#   ComponentHelper.CreateAtComponent(IComponent parent, String name, ICommandInfo info)
+#   ComponentHelper.MoveBodiesToComponent(ISelection bodies, IComponent comp, Boolean copy, ICommandInfo info)
+#   ComponentHelper.MoveBodiesToComponent(ISelection bodies, IPart part, Boolean copy, ICommandInfo info)
+#   ComponentHelper.CreateSeparateComponents(ISelection bodies, ICommandInfo info)
+#   IComponent.GetAllBodies() / GetBodies() / GetInstance() / GetOccurrence()
+#
+# **关键行为：体一旦进了组件，`GetRootPart().Bodies` 就再也看不到它了。**
+# 实测 2 个体把一个搬进组件后，根零件的 Bodies 从 2 变 1、Components 从 0 变 1，
+# 那个体只能从 `comp.GetAllBodies()` 拿到。这和 §22.1 里 Pattern 的表现是同一个坑。
+#
+# 搬回根零件的**唯一实测可行路径**是 `MoveBodiesToComponent(体, GetRootPart(), False, None)`
+# —— 传 `IPart` 的那个重载。`ComponentHelper.FlattenAssembly(...)` 实测**是个空操作**：
+# 无论选组件还是选根零件都返回 Success=True，但体纹丝不动。
+#
+# 另外：组件里的体一样能 measure、能挑面、能 `name_faces`（实测通过），
+# 但命名之后 `NamedSelection.GetGroups()` 那次枚举让脚本硬崩过一次——
+# 所以**推荐的顺序还是"先搬回根零件，再命名"**。
+# ---------------------------------------------------------------------------
+
+def component(name, parent=None):
+    """建一个空组件（parent=None 建在根零件下），返回组件对象。
+
+    实测：`CreateAtRoot("Asm", None)` 建出来的组件 `.Name` 是**空的**，
+    要用 `ComponentHelper.SetName(comp, name)` 才真正命名，所以这里补一次。
+    """
+    ensure_document()
+    try:
+        if parent is None:
+            comp = ComponentHelper.CreateAtRoot(str(name), None)
+        else:
+            comp = ComponentHelper.CreateAtComponent(parent, str(name), None)
+    except:
+        raise RuntimeError("component: SpaceClaim refused to create the component")
+    try:
+        if not str(comp.Name):
+            ComponentHelper.SetName(comp, str(name))
+    except:
+        pass
+    return comp
+
+
+def component_name(comp):
+    """组件的显示名（`.Name` 可能是空的，依次退回 GetInstanceName / GetInstance）。"""
+    try:
+        nm = str(comp.Name)
+        if nm:
+            return nm
+    except:
+        pass
+    try:
+        nm = str(comp.GetInstanceName())
+        if nm:
+            return nm
+    except:
+        pass
+    try:
+        return str(comp.GetInstance().Name)
+    except:
+        return "<unnamed>"
+
+
+def move_to_component(bodies, comp, copy=False):
+    """把体搬进组件（copy=True 则保留原件）。
+
+    实测：搬进去之后 `GetRootPart().Bodies` 就看不见它了，要用 `component_bodies()`。
+    """
+    items = _as_body_list(bodies)
+    if not items:
+        raise ValueError("move_to_component: no body given")
+    try:
+        ComponentHelper.MoveBodiesToComponent(Selection.Create(items), comp, bool(copy), None)
+    except:
+        raise RuntimeError("move_to_component: SpaceClaim refused to move these bodies")
+    return comp
+
+
+def move_to_root(bodies):
+    """把体搬回根零件（组件 -> 根零件的唯一实测可行路径）。"""
+    items = _as_body_list(bodies)
+    if not items:
+        raise ValueError("move_to_root: no body given")
+    try:
+        ComponentHelper.MoveBodiesToComponent(Selection.Create(items), GetRootPart(), False, None)
+    except:
+        raise RuntimeError("move_to_root: SpaceClaim refused to move these bodies back to the root")
+    return items
+
+
+def explode_to_components(bodies):
+    """每个体单独进一个组件（实测 3 个体 -> Components=3、根零件 Bodies=0）。"""
+    items = _as_body_list(bodies)
+    if not items:
+        raise ValueError("explode_to_components: no body given")
+    try:
+        ComponentHelper.CreateSeparateComponents(Selection.Create(items), None)
+    except:
+        raise RuntimeError("explode_to_components: SpaceClaim refused to split these bodies")
+    return components()
+
+
+def components(part=None):
+    """根零件下（一层）的组件列表。"""
+    if part is None:
+        part = GetRootPart()
+    out = []
+    try:
+        for i in range(part.Components.Count):
+            out.append(part.Components[i])
+    except:
+        pass
+    return out
+
+
+def component_bodies(comp):
+    """一个组件里的所有体。"""
+    try:
+        return list(comp.GetAllBodies())
+    except:
+        try:
+            return list(comp.GetBodies())
+        except:
+            return []
+
+
+def all_bodies():
+    """根零件下的体 + 所有组件里的体。
+
+    我们的命名/校验默认只看 `GetRootPart().Bodies`；文档里一旦用了组件，
+    那些体就"消失"了，所以需要这个把两边都算上。
+    """
+    out = []
+    try:
+        for i in range(GetRootPart().Bodies.Count):
+            out.append(GetRootPart().Bodies[i])
+    except:
+        pass
+    for c in components():
+        out.extend(component_bodies(c))
+    return out
+
+
+def _as_body_list(bodies):
+    if bodies is None:
+        return []
+    if isinstance(bodies, (list, tuple)):
+        return list(bodies)
+    if type(bodies).__name__ == "DesignBody":
+        return [bodies]
+    try:
+        return list(bodies)
+    except:
+        return [bodies]
+
+
+def drop_empty_components(part=None):
+    """删掉空组件。
+
+    实测：搬空之后的组件如果留在文档里，`NamedSelection.GetGroups()` 会抛
+    **中文**的 SystemError（"未将对象引用设置到对象的实例"）——命名选择整个读不出来，
+    而且旧版 `verify_model.py` 会把这种失败吞掉、照样报 OK。所以搬完体之后请调一次。
+    返回删掉的组件数。
+    """
+    if part is None:
+        part = GetRootPart()
+    before = len(components(part))
+    try:
+        ComponentHelper.DeleteEmptyComponents(part, None)
+    except:
+        try:
+            ComponentHelper.DeleteEmptyComponents(None)
+        except:
+            return 0
+    return before - len(components(part))
+
+
+def assembly_summary():
+    """当前文档的装配结构：[("(root)", 体数)] + 每个组件的 (名字, 体数)。"""
+    out = [("(root)", GetRootPart().Bodies.Count)]
+    for c in components():
+        out.append((_ascii(component_name(c)), len(component_bodies(c))))
     return out
 
 
