@@ -265,16 +265,20 @@ def rotate(body, angle_deg, axis="z", center=(0.0, 0.0, 0.0)):
 
 
 def tube(outer_radius, inner_radius, height, origin=(0.0, 0.0, 0.0), axis="z",
-         name="Pipe", overshoot=1.0):
+         name="Pipe", overshoot=1.0, separate=False):
     """空心圆管：外圆柱 + 内圆柱布尔减。
 
     overshoot 是内圆柱两端各多伸出的长度(mm)，保证把管壁切穿干净。
+    separate=True 时外圆柱用 `ForceIndependent` —— **共轭传热里必须这样**：
+    管壁要插在一个尺寸完全相同的管孔里，默认的并集会把管子吃进孔壁（实测：
+    12 根管子建完只剩 1 个体、管孔被填掉），设了 separate 之后 12 根各自独立。
     返回外圆柱那个体（布尔减之后它就是管体本身）。
     """
     if inner_radius >= outer_radius:
         raise ValueError("tube(): inner_radius must be smaller than outer_radius")
     a = axis.lower()
-    outer = cylinder(outer_radius, height, origin=origin, axis=a, name=name)
+    outer = cylinder(outer_radius, height, origin=origin, axis=a, name=name,
+                     separate=separate)
     x0, y0, z0 = origin
     if a == "x":
         cut_origin = (x0 - overshoot, y0, z0)
@@ -282,7 +286,13 @@ def tube(outer_radius, inner_radius, height, origin=(0.0, 0.0, 0.0), axis="z",
         cut_origin = (x0, y0 - overshoot, z0)
     else:
         cut_origin = (x0, y0, z0 - overshoot)
+    key = _body_key(outer)
     cylinder(inner_radius, height + 2.0 * overshoot, origin=cut_origin, axis=a, cut=True)
+    # 切完内孔之后，之前拿到的包装对象**可能已经失效**（实测在 CHT 场景里就是这样，
+    # 后面拿它取 Faces 会 "The object is deleted."），所以按 Moniker 重新取一次。
+    for b in GetRootPart().Bodies:
+        if _body_key(b) == key:
+            return b
     return outer
 
 
@@ -2950,6 +2960,142 @@ def find_coincident_pairs(body_a, body_b, tol=1e-3):
                 continue
             pairs.append((fa, fb))
     return pairs
+
+
+def _face_center_key(c, tol):
+    """把面心按容差取整，作为哈希键（避免 O(N*M) 的两两比较）。"""
+    return (int(round(c[0] / tol)), int(round(c[1] / tol)), int(round(c[2] / tol)))
+
+
+def _all_faces(target):
+    """把一个体 / 一串体 展开成面列表。"""
+    out = []
+    for b in _as_body_list(target):
+        try:
+            out.extend(list(b.Faces))
+        except:
+            pass
+    return out
+
+
+def find_coincident_pairs_multi(bodies_a, bodies_b, tol=1e-3):
+    """跨**多个体**找出成对的交界面（面心与面积都吻合），返回 [(face_a, face_b), ...]。
+
+    和单体的 `find_coincident_pairs` 相比：两侧都可以是一串体 —— 管束里
+    "壳程流体上的 12 个管孔壁" 对 "12 个管壁体的外表面" 就是这种。
+    用面心取整做哈希索引，不做 O(N*M) 的两两比较；同一边的每张面只会被配一次。
+    """
+    fa_list = _all_faces(bodies_a)
+    index = {}
+    for fb in _all_faces(bodies_b):
+        index.setdefault(_face_center_key(face_center(fb), tol), []).append(fb)
+    pairs = []
+    used = {}
+    for fa in fa_list:
+        aa = face_area(fa)
+        for fb in index.get(_face_center_key(face_center(fa), tol), []):
+            k = _face_key(fb)
+            if k in used:
+                continue
+            ab = face_area(fb)
+            if abs(aa - ab) > tol * max(1.0, aa):
+                continue
+            used[k] = 1
+            pairs.append((fa, fb))
+            break
+    return pairs
+
+
+def interface_report(bodies_a, bodies_b, tol=1e-3, tol_loose=1.0, find_suspects=False):
+    """交界面**配平自检**，返回 dict：
+
+      pairs      配上的面对数
+      area_a     配上的面在 A 侧的面积合计（mm²）
+      area_b     配上的面在 B 侧的面积合计
+      balanced   两侧面积是否相等 —— **这才是"交界面配平"的真正判据**
+      suspects   [(face_a, face_b, area_a, area_b), ...]，**默认不查**（find_suspects=True 才填）
+      faces_a / faces_b  两侧各自的面数（供参考，不是所有面都该配上）
+
+    为什么要它：管束里几十张面配对，眼睛是数不清的；`pairs` 对不对、`area_a` 与
+    `area_b` 是否相等，这两条就能把"少配了一根管""一侧多出一段"全部抓出来。
+    实测：12 根管的 CHT 模型两侧各 37699.11 mm²、`balanced=True`，而故意把管壁做长
+    10mm 时两侧立刻变成 3455.75 vs 3141.59 一根、`balanced=False`。
+
+    `suspects` 为什么默认关：它的判据是"面心很接近但面积差 >1%"，而**同心的圆盘和圆环
+    天然会落进来**——实测在上面那个完全正确的模型里它报了 36 条假阳性
+    （管壁端面环 28.27 mm² vs 管程端面圆盘 50.27 mm²，圆心正好重合）。
+    只有在你怀疑"一侧一张面、另一侧被切成两张"时才打开它，而且**要一条条看**。
+    """
+    pairs = find_coincident_pairs_multi(bodies_a, bodies_b, tol)
+    area_a = 0.0
+    area_b = 0.0
+    for (fa, fb) in pairs:
+        area_a += face_area(fa)
+        area_b += face_area(fb)
+
+    suspects = []
+    if find_suspects:
+        fa_list = _all_faces(bodies_a)
+        fb_list = _all_faces(bodies_b)
+        index = {}
+        for fb in fb_list:
+            index.setdefault(_face_center_key(face_center(fb), tol_loose), []).append(fb)
+        for fa in fa_list:
+            ca = face_center(fa)
+            aa = face_area(fa)
+            kx, ky, kz = _face_center_key(ca, tol_loose)
+            best = None
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    for dz in (-1, 0, 1):
+                        for fb in index.get((kx + dx, ky + dy, kz + dz), []):
+                            cb = face_center(fb)
+                            d = max(abs(ca[0] - cb[0]), abs(ca[1] - cb[1]), abs(ca[2] - cb[2]))
+                            if d <= tol_loose and (best is None or d < best[0]):
+                                best = (d, fb)
+            if best is None:
+                continue
+            ab = face_area(best[1])
+            if abs(aa - ab) > 0.01 * max(1.0, aa):
+                suspects.append((fa, best[1], aa, ab))
+
+    return {
+        "pairs": len(pairs),
+        "area_a": area_a,
+        "area_b": area_b,
+        "balanced": len(pairs) > 0 and abs(area_a - area_b) <= tol * max(1.0, area_a),
+        "suspects": suspects,
+        "faces_a": len(_all_faces(bodies_a)),
+        "faces_b": len(_all_faces(bodies_b)),
+    }
+
+
+def name_interfaces_multi(bodies_a, bodies_b, prefix="interface", grouped=True, tol=1e-3):
+    """跨**多个体**命名交界面，返回配对数。
+
+    grouped=True（默认）：两侧各做成**一个**命名选择 —— `<prefix>_a` / `<prefix>_b`。
+        管束那种几十张面配对的场景，Fluent 里要的就是"一对 zone"，而不是几十对。
+    grouped=False：逐对命名 `<prefix>_a1` / `<prefix>_b1` …（需要逐管单独控制时用）
+
+    典型用法（壳程流体 ↔ 管壁固体）：
+
+        n = name_interfaces_multi(shell_side, tube_walls, "shell_tube")
+        r = interface_report(shell_side, tube_walls)
+        assert r["balanced"], r
+    """
+    pairs = find_coincident_pairs_multi(bodies_a, bodies_b, tol)
+    if not pairs:
+        return 0
+    if grouped:
+        name_faces("%s_a" % prefix, [p[0] for p in pairs])
+        name_faces("%s_b" % prefix, [p[1] for p in pairs])
+    else:
+        for idx in range(len(pairs)):
+            fa, fb = pairs[idx]
+            tag = "_%d" % (idx + 1)
+            name_faces("%s_a%s" % (prefix, tag), [fa])
+            name_faces("%s_b%s" % (prefix, tag), [fb])
+    return len(pairs)
 
 
 def name_face_pair(name_a, name_b, face_a, face_b):

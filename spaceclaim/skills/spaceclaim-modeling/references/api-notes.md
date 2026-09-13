@@ -1177,6 +1177,76 @@ FillOptions : AutoExtendFillArea / PatchBlend / ZipLaminarEdges / GapAngle / Gap
 **顶面被折流板切断后剩下的一半**（x 0..60、y=50、面积 2400）—— 它的包围盒中心 x 也是 30。
 加上 `normal` + `sign` 约束之后就准了。规则里能用几个条件就用几个。
 
+## 25. 多体 CHT 流固交界面（第 20 个回归用例）
+
+### 25.1 接口
+
+库里新增三个函数（都是纯 Python 组合，没有新 API）：
+
+```
+find_coincident_pairs_multi(bodies_a, bodies_b, tol=1e-3) -> [(face_a, face_b), ...]
+name_interfaces_multi(bodies_a, bodies_b, prefix, grouped=True, tol=1e-3) -> 配对数
+interface_report(bodies_a, bodies_b, tol=1e-3, tol_loose=1.0, find_suspects=False) -> dict
+```
+
+`find_coincident_pairs_multi` 用"面心按 tol 取整"做哈希索引（不做 O(N·M) 两两比较），
+每张 B 侧面只配一次。判据仍是 **面心吻合 + 面积吻合**。
+
+`interface_report` 的判据里，**`balanced`（两侧配对面积相等）才是真正能信的那条**：
+
+| 模型 | pairs | area_a | area_b | balanced |
+|---|---|---|---|---|
+| 正确的 12 根管 CHT（两侧管壁都 100 长） | 12 | 37699.11 | 37699.11 | **True** |
+| 故意把管壁做长 10mm | 0 | 0.00 | 0.00 | **False** |
+| 正确的 4 根管 CHT（第 20 个用例） | 4 | 6031.86 | 6031.86 | **True** |
+| 故意造一根长 8mm 的管程体 | 0 | 0.00 | 0.00 | **False** |
+
+`suspects`（面心近、面积差 >1%）**默认关**：同心的圆盘/圆环天然落进来 ——
+在一个完全正确的 CHT 模型里它报了 **36 条假阳性**
+（管壁端面环 π(5²−4²)=28.27 vs 管程端面圆盘 π·4²=50.27，圆心正好重合）。
+只有怀疑"一侧一张面、另一侧被切成两张"时才 `find_suspects=True` 并逐条看。
+
+### 25.2 三层 CHT 的实测配方与数字
+
+`examples/cht_tube_bundle_demo.py`：壳程流域 100×50×40 + 12 根管（外 r5 / 内 r4，管间距 12）
++ 管程流体 12 根 r4。
+
+| 项 | 实测 |
+|---|---|
+| 体数 | **25** = 壳程 1 + 管壁 12 + 管程 12（无残留刀具体） |
+| zone 数 | 10：shell_inlet 1 · shell_outlet 1 · shell_wall 4 · **shell_tube_a 12 / shell_tube_b 12** · **tube_fluid_a 12 / tube_fluid_b 12** · tube_wall_end 24 · tube_inlet 12 · tube_outlet 12 |
+| shell_tube 交界面 | 12 对，两侧各 **37699.11** = 12·2π·5·100，balanced=True |
+| tube_fluid 交界面 | 12 对，两侧各 **30159.29** = 12·2π·4·100，balanced=True |
+| shell_inlet | 1057.52 = 50·40 − 12·π·5² |
+
+### 25.3 四条硬规矩（每条都有翻车记录）
+
+1. **管壁必须 `separate=True`。** 管外表面与壳程孔壁尺寸完全相同，默认并集把管子吃进孔壁：
+   实测 `tube()` 连建 12 根之后文档里只有 1 个管状体、管孔被填掉，`tube_walls` 列表里
+   12 个引用全指向壳体。**CHT 分层直接塌掉**。
+2. **刀的端面不能与目标体端面共面。** 实测：刀长与壳体等长时，第 2 次挖孔**没挖**（壳体面数
+   停在 7 不动），却在文档里多出一个 **3 个面的未命名实体圆柱**（长 110、正好是刀）。
+   刀两端各出头 → 正常。
+3. **管间距必须 > 2×管外半径。** R=5 配 10mm 间距 = 相邻管**外切**：实测 12 次挖孔里
+   **11 次失败**、留下 11 个未命名刀具体（`??|(110.0, 10.0, 10.0)`），而壳体照样"看起来建成了"。
+   这和 §22.4 的"刀与壁面相切"是同一类布尔脆弱性。
+4. **同名 zone 必须合并着建。** 对 12 根管子各调一次 `name_faces_by_rules(t, [("tube_wall_end", …)])`
+   → 12 组同名命名选择 → 随后 `NamedSelection.GetGroups()` **宿主级崩溃**（日志里只有空的
+   `Script failed:`）。改成先收集面、最后 `name_faces("tube_wall_end", faces)` 一次命名就正常。
+
+### 25.4 两侧长度必须一致
+
+交界面两侧的面长度不一样时，`find_coincident_pairs_multi` 会直接判**配不上**（面积不吻合），
+于是 `pairs=0`、`balanced=False`。实测把管壁从 100 改成 110：`shell_tube` 从
+12 对 37699.11 变成 **0 对**。这是好事——问题在建模脚本里就暴露了，而不是等到 Fluent 里
+interface 报错。
+
+### 25.5 `tube()` 的一个修正
+
+`tube()` 在切完内孔之后原来返回的是**切之前**抓到的包装对象；在 CHT 场景里它会失效
+（再拿它取 `Faces` 抛 `The object is deleted.`）。现在按 Moniker 重新取一次再返回。
+同时给它加了 `separate=False` 参数（见上面第 1 条）。
+
 
 
 

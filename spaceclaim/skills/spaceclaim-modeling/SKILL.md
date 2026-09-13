@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `all_components` / `component_children` / `explode_to_components` / `assembly_summary` in §1h.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `all_components` / `component_children` / `explode_to_components` / `assembly_summary` in §1h, and `name_interfaces_multi` / `interface_report` / `find_coincident_pairs_multi` in §1j.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -430,6 +430,33 @@ $S = "<skill-dir>"
 
 **挖料之后的面朝向是最容易错的一步**：用 `cut=True` 挖掉一块料，**x 小的那一侧那张墙面的外法向是 +X**（背离实体、指向空腔），不是 −X；挖出来的腔顶同理是 −Z。写反了那条规则一张都匹配不到，接着后面的规则会把它整批吃掉 —— 实测 `tube_bank_demo` 第一版 `inlet` 吃到了 3 张面、合计 3042.83 mm²，正好是"进出口 + 两块折流板"（1396.81 + 823.01 + 823.01）。**判断有没有吃错，最快的办法是把每个命名选择的面数 + 面积合计打出来和手算对。**
 
+## 1j. 共轭传热（CHT）的多体流固交界面
+
+一个体对一个体的交界面用 `name_interfaces(a, b, prefix)` 就够了；**管束那种"几十张面对几十张面"** 要用跨体的版本：
+
+```python
+n = name_interfaces_multi(shell_side, tube_walls, "shell_tube")   # 打成一对 zone
+n = name_interfaces_multi(tube_walls, tube_side, "tube_fluid")
+r = interface_report(shell_side, tube_walls)                      # 配平自检
+print(r["pairs"], r["area_a"], r["area_b"], r["balanced"])
+```
+
+- `grouped=True`（默认）把两侧各做成**一个**命名选择：`shell_tube_a`（12 张管孔壁）/ `shell_tube_b`（12 张管外壁）。Fluent 里要的就是一对 zone，不是 12 对。
+- `grouped=False` 才逐对命名（`_a1` / `_b1` …）。
+- `interface_report()` 返回 `pairs / area_a / area_b / balanced / suspects`。**`balanced`（两侧面积相等）才是真正的判据** —— 实测 12 根管的模型两侧各 37699.11 mm²，故意把一侧做长 10mm 时立刻 `balanced=False`。
+- `suspects` 默认**不查**（`find_suspects=True` 才填）：判据是"面心很近但面积差 >1%"，而**同心的圆盘和圆环天然会落进来** —— 实测在一个完全正确的模型里它报了 36 条假阳性（管壁端面环 28.27 vs 管程端面盘 50.27）。
+
+完整三层配方见 `examples/cht_tube_bundle_demo.py`（壳程流体 + 12 根管壁固体 + 管程流体）。实测：25 个体、10 个 zone、两处交界面各 12 对，面积 `37699.11` 与 `30159.29` 与手算逐位相等。
+
+### 做 CHT 时必须遵守的四条（都是实测撞出来的）
+
+1. **管壁要用 `tube(..., separate=True)`。** 管外表面和壳程孔壁尺寸完全相同，默认并集会把管子吃进孔壁 —— 实测 12 根建完只剩 1 个体、管孔全被填掉，三层塌成一层。
+2. **刀的端面不能和目标体的端面共面。** 共面时布尔**静默失败**，还在文档里留下一个实体刀具体（实测壳体面数没变、多出一个 3 面的未命名圆柱）。刀两端各出头 5mm 就没事。
+3. **管间距必须 > 2×管外半径。** R=5 配 10mm 间距意味着相邻两根管**外切** —— 实测 12 次挖孔只成功 1 次，剩下 11 个刀具体留在孔里，表面现象只是"面数不对"。
+4. **同名的 zone 一定要合并着建。** 对 12 根管子分别调 `name_faces_by_rules(t, [("tube_wall_end", …)])` 会建出 12 组同名 zone，随后 `NamedSelection.GetGroups()` **直接崩掉**。正确做法是把 12 根的面先收集到一个列表，最后 `name_faces("tube_wall_end", faces)` 命名一次。
+
+另外**两侧交界面的长度必须一致**：管壁比壳程长 10mm 的话两侧面积变成 3455.75 vs 3141.59，`balanced=False` 会当场报出来。
+
 ## 2. Run it
 
 ```powershell
@@ -512,9 +539,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_shell.py"         -Out "$S\tests\selftest_shell.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_array.py"         -Out "$S\tests\selftest_array.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_surface_asm.py"   -Out "$S\tests\selftest_surface_asm.scdocx"   -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_cht.py"           -Out "$S\tests\selftest_cht.scdocx"           -Verify
 ```
 
-All nineteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All twenty must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -536,6 +564,7 @@ All nineteen must end in `[scdm] status=ok` and print the verify block. Regressi
 | `selftest_elbow` | 3 bodies: `Bend 44×44×6.009` (7 faces) · `Elbow45 4×12.021×7.808` (3) · `UTurn 28×14×4` (3) | Bend: inlet 28.27 @ (0,-21,0) · outlet 28.27 @ (-41,20,0) · bend_wall 573.89 · wall 4 faces (405.27 / 405.27 / 0.13 / 0.13) · Elbow45: e45_inlet 12.57 @ (0,60,0) · e45_wall 148.04 · e45_outlet 12.57 · UTurn: uturn_inlet 12.57 @ (0,120,0) · uturn_wall 473.74 · uturn_outlet 12.57 @ (-24,120,0) |
 | `selftest_shell` | 7 bodies: `HollowCube 20³` (12 faces) · `OpenCup 20³` (11) · `OpenDuct 20³` (10) · `HollowCyl 20×20×20` (6 — 4 plane + 2 cylinder) · `Outward 24³` (12) · `TooThick 20³` (6 — t=11 refused, untouched) · `PreNamed 20³` (11) | hollow_outer 6 × 400.00 · hollow_cavity 6 × 256.00 @ ±2 · cup_rim 144.00 @ (50,10,20) · cup_outer 5 × 400.00 · cup_inner 5 面 · duct_rim/duct_rim2 各 144.00 @ z=20/z=0 · duct_outer 4 × 400.00 · duct_inner 4 × 320.00 · pre_outlet 被重映射成 144.00 |
 | `selftest_array` | 22 bodies: `Pin_1..4` (各 6 面) · `Fin_1..6` (6) · `Blade_1..6` (6) · `Half` (合并后 1 体 20×10×10) · `Half2` + `Half2Mirror` · `BankDomain 60×40×30` (**15 面**) | bank_inlet/bank_outlet 各 1200.00 @ (700,20,15)/(760,20,15) · bank_tubes **9 × 565.49** @ 706/718/730 × 6/18/30 · bank_wall 4 面（1800 / 1800 / 2145.53 / 2145.53） |
+| `selftest_cht` | 10 bodies: `ShellSide 60×36×24` (**10 面** = 6 平面 + 4 个管孔壁) · `TubeWall` ×4 (各 4 面) · `TubeSide` ×4 (各 3 面) · `ProbeSide 68×6×6`（故意做长 8mm 的对照体） | shell_tube_a/b 各 4 × 1507.96 · tube_fluid_a/b 各 4 × 1130.97 · shell_inlet 662.94 · shell_wall 4 面 · tube_wall_end 8 面 · 对照体 pairs=0 balanced=False |
 | `selftest_surface_asm` | 7 bodies: `RectSurf 20×10×2` (6 面) · `CircSurf 20×20×0` (**1 面**) · `SymSurf 40×40×8` (6) · `PullMe 20×20×25` (6) · `Baffle 30×1×20` (6) · `CompA` · `CompB` (各 6) | baffle_a/baffle_b 各 150.00（30×5? 见 verify）· baffle_edge 4 面 |
 
 Run these before blaming a new model script.
