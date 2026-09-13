@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d: `edge_kind`, `edge_length`, `edge_center`, `edge_extent`, `edge_direction`, `edge_axis`, `edge_points`, `edge_distance_to_point`, `edge_is_smooth`, `edge_is_concave`, `edge_summary`, `edges_where`, `edges_by_kind`, `edges_parallel`, `edges_perpendicular`, `edges_along_axis`, `edges_at`, `edges_between`, `edges_in_box`, `edges_by_length`, `edges_by_curvature`, `edges_of_face`, `edges_of_faces`, `edges_at_point`, `nearest_edge`, `match_edges`, `round_edges`, `round_face_edges`, `round_vertical_edges`, `round_outer_rims`, `round_by_rules`, `chamfer_edges`, `chamfer_by_rules`.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d and the bend set in §1e.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -215,6 +215,46 @@ chamfer_by_rules(duct, [({"kind": "circle"}, 0.5)])   # 只倒圆边
 
 一个必须知道的面数直觉：整块倒圆之后，**平面面会缩成 (边长 − 2r)² 的方块，倒圆面和平面面之间是相切软边，不产生边**。所以 20mm 立方体 r=2 的每个平面面是 16×16 = 256 mm²，不是"20×20 去四角"。用面中心定位命名规则时不受影响，但按面积卡规则时要按这个数来。
 
+## 1e. 弯头 / 圆环（真圆截面，弯管不用扫掠）
+
+**弯管/弯头不需要 Sweep**——用"草图圆 + 回转"就能做出**真圆截面**的 torus 段：
+
+```python
+# 单个 90° 弯头：管半径 3、弯曲半径 20，起始端面圆心在原点
+bend = elbow(pipe_radius=3.0, bend_radius=20.0, angle_deg=90.0, name="Bend90")
+
+# 整圈圆环（= 弯曲 360°）
+ring = torus(pipe_radius=3.0, bend_radius=20.0)
+
+# 多个弯头必须一次批量建（草图有硬限制，见 §12.1）
+bends = elbows([
+    {"pipe_radius": 3.0, "bend_radius": 20.0, "angle_deg": 90.0,  "origin": (0,0,0),    "axis": "z", "name": "Bend90"},
+    {"pipe_radius": 2.0, "bend_radius": 12.0, "angle_deg": 180.0, "origin": (0,60,0),   "axis": "z", "name": "UTurn"},
+    {"pipe_radius": 2.0, "bend_radius": 15.0, "angle_deg": 45.0,  "origin": (0,120,0),  "axis": "x", "name": "Bend45"},
+])
+```
+
+摆位约定（实测过，可以照着算）：**起始端面的圆心落在 `origin`**；`axis` 是**弯曲轴**，弯头躺在垂直于它的平面里，管从起始端面沿下表方向出发、绕 axis 逆时针弯。
+
+| axis | 起始方向 | 弯曲平面 |
+|---|---|---|
+| `"z"` | +Y | XY |
+| `"x"` | +Y | YZ |
+| `"y"` | −Z | ZX |
+
+实测基线（写回归用例时对着核）：
+
+| 形状 | 面数 | 面积 |
+|---|---|---|
+| r=3、R=20、360°（torus） | 1（kind=`torus`） | 2368.705 mm² = 4π²Rr；包围盒 46×46×6 |
+| r=3、R=20、90° | 3（torus + 2 个整圆端面） | 592.176 = 4π²Rr/4 · 端面各 28.274 = πr²；包围盒 23×23×6 |
+
+`bend_radius` **必须大于** `pipe_radius`，否则回转轴会切进管壁——这种情况库会直接抛 ASCII 的 `ValueError`。
+
+底部接口 `revolve_profiles` 现在也支持 `{"kind": "circle", "center": (u, v), "radius": r}`，可以和折线轮廓混在一批里。
+
+**把弯头和直管拼成一个流体域**（实测）：直管用 `cylinder(...)` 与弯头**过盈 1mm** 就会并成一个体。代价是近相切并集必然留下 2 张 ~0.13 mm² 的微小面片（已归进 `wall`），总面数 7：inlet 28.27、outlet 28.27、两段直管壁各 405.27、圆环面 573.89、两张小面片各 0.13。
+
 ## 2. Run it
 
 ```powershell
@@ -252,7 +292,9 @@ The runner composes the script, runs the verified command line, and judges succe
 | Cone / frustum | **Reachable via revolve** — this supersedes the earlier "impossible" conclusion. `RevolveFaces.Execute(faceSel, Line.Create(point, dir), radians, RevolveFaceOptions())` turns a closed profile into a solid of revolution: a trapezoid gives a **true** frustum, a triangle a **true** cone. Use `cone_frustum()` / `cone_frustums()`. `Loft` and `ExtrudeProfile` remain unusable (see `references/api-notes.md` §7.3, §14). |
 | Face measurement | `Face.GetBoundingBox(Matrix.CreateScale(1.0))` returns an **analytic** face box (`Center` / `MinCorner` / `MaxCorner`). The old edge-sampling method could not see extremes that are isolated vertices — a cone's apex lies on no edge and the cone surface has no seam edge — so it measured a cone's axial extent as **0** and broke `name_boundaries` on cones. Do **not** call `GetExtremePoint(d, d, d)`: three identical directions raise `ValueError`. |
 | Overlap | A new body overlapping an existing one is **unioned** into it by default; `ExtrudeType.ForceIndependent` (`separate=True`) prevents that. |
-| Sweep / elbow | **Not usable yet — do not retry from scratch.** `Sweep.Execute(profile, path, SweepCommandOptions())` reports `Success=True` in cases where it produces **no geometry at all** (verified: a polyline path and an in-plane arc path both silently no-op'd). One out-of-plane arc did produce a 3-face solid whose size did not match a hand calculation. Judge a sweep by the body/face count, never by `Success`. Pick up from `references/api-notes.md` §15. |
+| Sweep / elbow | **Sweep 仍然不能用 —— 但弯管已经用别的路子做出来了，见 §1e 的 `elbow()` / `torus()`（草图圆 + 回转 = 真圆截面 torus 段），所以不要再为了弯头去啃 Sweep。** `Sweep.Execute(profile, path, SweepCommandOptions())` 会在**什么都不生成**的情况下返回 `Success=True`（实测折线路径、平面内圆弧路径、参数开关两个取值都试过）。判定扫掠必须看体数/面数，永远不能看 `Success`。`FullRound.Execute(面, None)` 同样是 `Success=True` 但面数不变。细节见 `references/api-notes.md` §15。 |
+| Body lookup | `_created_body(res, before)` 决定"这次建体命令动的是哪个体"，从而决定谁被改名。**绝不能退回"取根零件里最后一个体"**：新体与已有体重叠被并进后者时结果对象里可能是空的，那样会把文档里另一个毫不相干的体改名（实测：弯头用例里 `UTurn` 被改成了默认名 `"Body"`）。现在的顺序是 ①体集合之差 → ②结果对象的 `CreatedBody(s)` → ③快照里**唯一**指纹变了的体 → ④`None`。所以 `box`/`cylinder`/`sphere`/`stepped_cone` 都必须在命令前 `_snapshot_bodies()`。 |
+| `rest` 规则 | `{"rest": True}` **单独用**时是"剩下全要"；**和别的键组合**时（`{"kind": "plane", "rest": True}`）是"在剩下的里面再按这些条件筛"。所以规则表里"两个端口分别命名 + 中间圆环面命名"可以写成 `nearest` → `kind` → `rest` 三条，不用再手工切分。 |
 | Sphere / boolean cut | `SphereBody.Create(center, radius)` works: r=5 gives 1 body, 1 face of kind `sphere`, area 314.16 mm², bbox 10³. But **`ExtrudeType.Cut` does not cut for a sphere** — the sphere becomes a separate body and the target keeps its 6 faces. `ExtrudeType.ForceCut` does work (verified: a 20³ box gains a 7th face, the spherical cavity, area 452.39 mm² = 4πr²). `box`/`cylinder` cuts are verified fine with plain `Cut`. |
 | Body names | An unnamed body keeps a **localised** default name (Chinese here). `"%s" % body.Name` raises `UnicodeEncodeError` during formatting — *outside* `_safe_print`'s protection — and kills the script. Use `_ascii(name)` (in the library) before formatting; `verify_model.py` does this for body names. |
 | Units | `MM(x)` converts mm to internal metres. `Point.Create` takes metres — never pass raw mm. |
@@ -290,9 +332,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_imprint.py"        -Out "$S\tests\selftest_imprint.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_external_flow.py" -Out "$S\tests\selftest_external_flow.scdocx" -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_fillet.py"        -Out "$S\tests\selftest_fillet.scdocx"        -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_elbow.py"         -Out "$S\tests\selftest_elbow.scdocx"         -Verify
 ```
 
-All fifteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All sixteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -311,6 +354,7 @@ All fifteen must end in `[scdm] status=ok` and print the verify block. Regressio
 | `selftest_imprint` | 2 bodies: `Plate 40x40x10` (7 faces after the split) · `Cutter 10x10x40` | patch 78.54 mm² @ (20,20,0) loops=1 · rest 1521.46 mm² @ (20,20,0) loops=2 |
 | `selftest_external_flow` | 1 body: `Domain 60x40x40` (7 faces) — the cylinder obstacle was absorbed as a void | inlet/outlet 1600 mm² @ (0,20,20)/(60,20,20) · obstacle 1256.64 mm² @ (30,20,20) · top/bottom_wall 2321.46 mm² @ z=40/z=0 · side_wall 2 faces × 2400 mm² |
 | `selftest_fillet` | 10 bodies: `RoundCube 20³` (26 faces / 48 edges — 24 line + 24 circle) · `RoundCubeZ 20³` (10 / 24) · `ChamferCube 20³` (26 / 48 lines) · `RoundTube 20x20x20` (8 / 8 circles) · `RoundedDuct 4x4x10` (10 / 24) · `RuleBox 20³` (26 / 56) · `ChamferTwo 20³` (10 / 24) · `FaceRound 20³` (10 / 20 — 16 line + 4 ellipse) · `TooBig 10³` (6 — r=9 refused, untouched) · `Stale 20³` (26) | cu_inlet/outlet 各 256.00 mm² @ (10,10,0)/(10,10,20) · cu_side 4 × 256.00 · cu_edge_fillet 12 × 50.27 · cu_corner 8 × 6.28 · cz_inlet/outlet 各 392.27 @ (40,10,0)/(40,10,20) · cz_fillet 4 × 94.25 · cz_side 4 × 280.00 · duct_inlet/outlet 各 15.14 @ (2,82,0)/(2,82,10) · duct_fillet 4 × 15.71 · duct_wall 4 × 20.00 |
+| `selftest_elbow` | 3 bodies: `Bend 44×44×6.009` (7 faces) · `Elbow45 4×12.021×7.808` (3) · `UTurn 28×14×4` (3) | Bend: inlet 28.27 @ (0,-21,0) · outlet 28.27 @ (-41,20,0) · bend_wall 573.89 · wall 4 faces (405.27 / 405.27 / 0.13 / 0.13) · Elbow45: e45_inlet 12.57 @ (0,60,0) · e45_wall 148.04 · e45_outlet 12.57 · UTurn: uturn_inlet 12.57 @ (0,120,0) · uturn_wall 473.74 · uturn_outlet 12.57 @ (-24,120,0) |
 
 Run these before blaming a new model script.
 

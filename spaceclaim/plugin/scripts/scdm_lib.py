@@ -66,30 +66,76 @@ def _extrude_type(cut, separate=False):
     return None
 
 
-def _created_body(res):
-    """从命令结果里取新建/被修改的体；不同命令的成员名不一样。
+def _body_signature(body):
+    """体的廉价指纹（面数 + 总面积），用来判断某个体是不是被并集改过了。"""
+    n = 0
+    area = 0.0
+    try:
+        for f in body.Faces:
+            n += 1
+            try:
+                area += float(_shape_of(f).Area)
+            except:
+                pass
+    except:
+        pass
+    return (n, round(area, 9))
 
-    兜底：如果结果对象取不到体（例如新体与已有体发生了合并/相加），
-    就取根零件里最后一个体——对“新建”语义来说它就是刚生成（或被改）的那个。
+
+def _snapshot_bodies():
+    """建体之前先给文档里现有的每个体拍一张指纹快照。"""
+    snap = []
+    for b in GetRootPart().Bodies:
+        snap.append((_body_key(b), b, _body_signature(b)))
+    return snap
+
+
+def _created_body(res=None, before=None):
+    """找出"这次建体命令"真正新建（或被并进去）的那个体。
+
+    按可靠性分三层：
+      1. **新出现的体**（key 不在 before 快照里）—— 不与已有体重叠时的正常情况；
+      2. 结果对象自带的 `CreatedBody` / `CreatedBodies[0]`；
+      3. **唯一一个指纹变了的旧体** —— 新体和已有体重叠被并进去时没有新体，
+         被改动的那个就是目标体。
+
+    三条都不成立就返回 None。**绝不退回"取根零件里最后一个体"**：
+    实测那会把文档里另一个毫不相干的体改名——弯头用例里 `UTurn` 被改成了默认名
+    "Body"，原因就是并集时 `CreatedBodies` 是空的、而它恰好排在最后。
+
+    调用方（box / cylinder / sphere / stepped_cone）都要在命令前 `_snapshot_bodies()`
+    并把快照传进来，否则第 1、3 层用不上。
     """
-    try:
-        b = res.CreatedBody
-        if b is not None:
-            return b
-    except:
-        pass
-    try:
-        bodies = res.CreatedBodies
-        if bodies is not None and bodies.Count > 0:
-            return bodies[0]
-    except:
-        pass
-    try:
-        bodies = list(GetRootPart().Bodies)
-        if bodies:
-            return bodies[len(bodies) - 1]
-    except:
-        pass
+    if before is not None:
+        keys = {}
+        for item in before:
+            keys[item[0]] = 1
+        for b in GetRootPart().Bodies:
+            if _body_key(b) not in keys:
+                return b
+    if res is not None:
+        try:
+            b = res.CreatedBody
+            if b is not None:
+                return b
+        except:
+            pass
+        try:
+            bodies = res.CreatedBodies
+            if bodies is not None and bodies.Count > 0:
+                return bodies[0]
+        except:
+            pass
+    if before is not None:
+        changed = []
+        for item in before:
+            try:
+                if _body_signature(item[1]) != item[2]:
+                    changed.append(item[1])
+            except:
+                pass
+        if len(changed) == 1:
+            return changed[0]
     return None
 
 
@@ -113,8 +159,9 @@ def box(width, depth=None, height=None, origin=(0.0, 0.0, 0.0), name="Body",
     p1 = Point.Create(MM(x0), MM(y0), MM(z0))
     p2 = Point.Create(MM(x0 + width), MM(y0 + depth), MM(z0 + height))
     et = _extrude_type(cut, separate)
+    snap = _snapshot_bodies()
     res = BlockBody.Create(p1, p2) if et is None else BlockBody.Create(p1, p2, et)
-    body = _created_body(res)
+    body = _created_body(res, snap)
     if name and not cut and body is not None:
         try:
             body.Name = name
@@ -148,11 +195,12 @@ def cylinder(radius, height, origin=(0.0, 0.0, 0.0), axis="z", name="Body",
         start = Point.Create(MM(x0), MM(y0), MM(z0 + height))
         end = Point.Create(MM(x0 + radius), MM(y0), MM(z0 + height))
     et = _extrude_type(cut, separate)
+    snap = _snapshot_bodies()
     res = CylinderBody.Create(c, start, end) if et is None else CylinderBody.Create(c, start, end, et)
     # 注意：CylinderBodyResult 只有 CreatedBodies，没有 CreatedBody
     #（BlockBodyResult / SphereResult 才两个都有），取错会得到
     # "Script failed: 'CylinderBodyResult' object has no attribute 'CreatedBody'"
-    body = _created_body(res)
+    body = _created_body(res, snap)
     if name and not cut and body is not None:
         try:
             body.Name = name
@@ -175,8 +223,9 @@ def sphere(radius, center=(0.0, 0.0, 0.0), name="Body", cut=False):
     c = Point.Create(MM(center[0]), MM(center[1]), MM(center[2]))
     # 实测 ExtrudeType.Cut 对球无效（球会变成独立体、目标体没被挖），改用 ForceCut
     et = ExtrudeType.ForceCut if cut else None
+    snap = _snapshot_bodies()
     res = SphereBody.Create(c, MM(radius)) if et is None else SphereBody.Create(c, MM(radius), et)
-    body = _created_body(res)
+    body = _created_body(res, snap)
     if name and not cut and body is not None:
         try:
             body.Name = name
@@ -264,13 +313,14 @@ def stepped_cone(radius1, radius2, height, segments=8, origin=(0.0, 0.0, 0.0),
 
     ensure_document()
     body = None
+    snap = _snapshot_bodies()
     for i in range(segs):
         rr = radius1 + (radius2 - radius1) * (i / float(segs))
         p1 = base_pt(i * step)
         p2 = base_pt((i + 1) * step)
         p3 = rim_pt((i + 1) * step, rr)
         if i == 0:
-            body = _created_body(CylinderBody.Create(p1, p2, p3))
+            body = _created_body(CylinderBody.Create(p1, p2, p3), snap)
         else:
             # 关键：后续段必须用 ExtrudeType.Add 才会和上一段合并成一个体
             CylinderBody.Create(p1, p2, p3, ExtrudeType.Add)
@@ -532,7 +582,11 @@ def revolve_profiles(profiles):
     """一次建多个回转体（绕各自的轴旋转）。
 
     profiles 里每个元素是 dict：
-        points      [(u, v), ...] 闭合轮廓；u 是**到旋转轴的距离（>= 0）**，v 是轴向坐标
+        kind        "polyline"（默认）/ "circle"
+        points      kind="polyline" 时用：[(u, v), ...] 闭合轮廓；
+                    u 是**到旋转轴的距离（>= 0）**，v 是轴向坐标
+        center      kind="circle" 时用：(u, v) 圆心；u 必须 > radius
+        radius      kind="circle" 时用：圆半径
         angle_deg   旋转角度（度），默认 360（整圈）。底层用弧度，内部换算
         axis        "x"/"y"/"z"（回转体最终的轴向；默认 "z"）
         origin      摆正后的位置（沿轴向对齐 bbox 最小端，另两轴按中心对齐）
@@ -544,6 +598,9 @@ def revolve_profiles(profiles):
 
     实测：矩形轮廓 (0,0)(5,0)(5,10)(0,10) 整圈 → 圆柱，3 个面，
     端面 78.54 mm² = pi*5^2、柱面 314.16 mm² = 2*pi*5*10。
+    实测：圆轮廓 center=(20,0)、radius=3 整圈 → **真圆环**（1 个 torus 面，
+    2368.705 mm² = 4*pi^2*R*r，包围盒 46x46x6）；只转 90° → 真圆截面弯头，
+    3 个面（torus 592.176 + 两个整圆端面 28.274，包围盒 23x23x6）。
 
     注意角度单位：底层 `RevolveFaces.Execute(面, Line, 角度, 选项)` 用的是**弧度**
     （传 2*pi 得到整圈；传 360 也得到整圈，因为 360 rad 已超过一圈）。
@@ -562,19 +619,35 @@ def revolve_profiles(profiles):
 
     norm = []
     for p in profiles:
+        kind = str(p.get("kind", "polyline")).lower()
+        if kind == "circle":
+            c = p.get("center")
+            if c is None:
+                raise ValueError("revolve_profiles: a circle profile needs 'center' = (u, v)")
+            r = float(p.get("radius", 0.0))
+            cu = float(c[0])
+            cv = float(c[1]) if len(c) > 1 else 0.0
+            if r <= 0.0:
+                raise ValueError("revolve_profiles: circle radius must be > 0")
+            if cu <= r:
+                raise ValueError("revolve_profiles: a circle profile must stay clear of the "
+                                 "axis (center u must be greater than radius), otherwise the "
+                                 "revolve axis cuts through the profile")
+            norm.append({"kind": "circle", "cu": cu, "cv": cv, "r": r, "u": cu + r})
+            continue
         pts = list(p.get("points") or [])
         if len(pts) < 3:
             raise ValueError("revolve_profiles: every profile needs at least 3 points")
         for (u, v) in pts:
             if u < 0:
                 raise ValueError("revolve_profiles: every u (distance from the axis) must be >= 0")
-        norm.append(pts)
+        norm.append({"kind": "polyline", "points": pts,
+                     "u": max(u for (u, v) in pts)})
 
     widest = 1.0
-    for pts in norm:
-        w = max(u for (u, v) in pts)
-        if w > widest:
-            widest = w
+    for item in norm:
+        if item["u"] > widest:
+            widest = item["u"]
     spacing = widest * 3.0
 
     # 1) 先把所有轮廓画完（互不重叠）
@@ -582,10 +655,16 @@ def revolve_profiles(profiles):
     for i in range(len(norm)):
         off = i * spacing
         offsets.append(off)
+        item = norm[i]
+        if item["kind"] == "circle":
+            # 实测：Point2D 的第一个分量落在全局 Z 上、第二个落在全局 X 上
+            SketchCircle.Create(Point2D.Create(MM(item["cv"]), MM(off + item["cu"])),
+                                MM(item["r"]))
+            continue
         lst = List[Point]()
-        for (u, v) in norm[i]:
+        for (u, v) in item["points"]:
             lst.Add(Point.Create(MM(off + u), MM(0), MM(v)))
-        first = norm[i][0]
+        first = item["points"][0]
         lst.Add(Point.Create(MM(off + first[0]), MM(0), MM(first[1])))
         SketchLine.CreatePolyLine(lst, False, False)
 
@@ -625,7 +704,10 @@ def revolve_profiles(profiles):
             rotate(body, -90.0, axis="x")
         elif a != "z":
             raise ValueError("revolve_profiles: axis must be 'x'/'y'/'z'")
-        _anchor_prism(body, a, tuple(p.get("origin", (0.0, 0.0, 0.0))))
+        org = p.get("origin", (0.0, 0.0, 0.0))
+        if org is not None:
+            # origin=None 表示"别摆正，留在回转出来的位置"（弯头要自己按起始端面定位）
+            _anchor_prism(body, a, tuple(org))
         nm = p.get("name")
         if nm:
             try:
@@ -634,6 +716,111 @@ def revolve_profiles(profiles):
                 pass
         out.append(body)
     return out
+
+
+def _rot_point(p, angle_deg, axis):
+    """把一个点按右手定则绕"过原点、方向 axis"的轴旋转 angle_deg 度（和 rotate() 同一套约定）。"""
+    import math
+    a = math.radians(float(angle_deg))
+    c = math.cos(a)
+    s = math.sin(a)
+    x, y, z = p
+    if axis == "x":
+        return (x, y * c - z * s, y * s + z * c)
+    if axis == "y":
+        return (x * c + z * s, y, -x * s + z * c)
+    return (x * c - y * s, x * s + y * c, z)
+
+
+def elbows(bends):
+    """一次建多个**真圆截面**弯头（圆环段）——弯管/弯头/回转弯。
+
+    每个元素是 dict：
+        pipe_radius  管半径 r
+        bend_radius  弯曲半径 R（管中心线的回转半径），**必须 > r**
+        angle_deg    弯曲角度（度），默认 90；给 360 就是一整个圆环（torus）
+        origin       起始端面的圆心落在哪（默认 (0,0,0)）
+        axis         弯曲轴（"x"/"y"/"z"，默认 "z"）；弯头躺在**垂直于 axis 的平面**里
+        name         体名
+
+    摆位约定（实测过，可以照着算）：**起始端面（θ=0 那个横截面）的圆心落在 origin 上**。
+    管从起始端面沿垂直于 axis 的方向出发，在垂直于 axis 的平面里绕 axis 逆时针弯：
+
+    ==========  ============  ==========
+    axis        起始方向       弯曲平面
+    ==========  ============  ==========
+    "z"         +Y            XY
+    "x"         +Y            YZ
+    "y"         -Z            ZX
+    ==========  ============  ==========
+
+    实测基线（r=3、R=20）：
+      * 90°  → 1 个体 3 个面：torus 592.176 mm² + 两个整圆端面 28.274 mm²
+               （合计 648.725 = 4*pi^2*R*r/4 + 2*pi*r^2），包围盒 23 x 23 x 6
+      * 360° → 1 个体 1 个面：torus 2368.705 mm² = 4*pi^2*R*r，包围盒 46 x 46 x 6
+
+    和所有草图类接口一样，**必须在任何实体之前调用**（见 revolve_profiles）。
+    """
+    norm = []
+    for b in bends:
+        r = float(b.get("pipe_radius", 1.0))
+        R = float(b.get("bend_radius", 3.0))
+        if r <= 0.0:
+            raise ValueError("elbows: pipe_radius must be > 0")
+        if R <= r:
+            raise ValueError("elbows: bend_radius must be greater than pipe_radius, otherwise "
+                             "the bend axis cuts through the pipe wall")
+        ax = str(b.get("axis", "z")).lower()
+        if ax not in ("x", "y", "z"):
+            raise ValueError("elbows: axis must be 'x'/'y'/'z'")
+        org = b.get("origin", (0.0, 0.0, 0.0))
+        norm.append({"r": r, "R": R,
+                     "angle": float(b.get("angle_deg", 90.0)),
+                     "axis": ax,
+                     "origin": (0.0, 0.0, 0.0) if org is None else tuple(org),
+                     "name": b.get("name", "Elbow")})
+    if not norm:
+        return []
+
+    widest = max(it["R"] + it["r"] for it in norm)
+    spacing = widest * 3.0
+
+    profiles = []
+    for it in norm:
+        profiles.append({
+            "kind": "circle",
+            "center": (it["R"], 0.0),
+            "radius": it["r"],
+            "angle_deg": it["angle"],
+            "axis": it["axis"],
+            "origin": None,          # 不在 revolve_profiles 里摆正，下面按起始端面自己定位
+            "name": it["name"],
+        })
+    bodies = revolve_profiles(profiles)
+
+    for i in range(len(bodies)):
+        it = norm[i]
+        p = (i * spacing + it["R"], 0.0, 0.0)      # 起始端面圆心的"回转后"位置
+        if it["axis"] == "x":
+            p = _rot_point(p, 90.0, "y")
+        elif it["axis"] == "y":
+            p = _rot_point(p, -90.0, "x")
+        move(bodies[i], it["origin"][0] - p[0], it["origin"][1] - p[1], it["origin"][2] - p[2])
+    return bodies
+
+
+def elbow(pipe_radius, bend_radius, angle_deg=90.0, origin=(0.0, 0.0, 0.0), axis="z",
+          name="Elbow"):
+    """单个真圆截面弯头。详见 elbows()（多个弯头请一次批量建，草图有硬限制）。"""
+    return elbows([{
+        "pipe_radius": pipe_radius, "bend_radius": bend_radius, "angle_deg": angle_deg,
+        "origin": origin, "axis": axis, "name": name,
+    }])[0]
+
+
+def torus(pipe_radius, bend_radius, origin=(0.0, 0.0, 0.0), axis="z", name="Torus"):
+    """整圈圆环（= 弯曲 360° 的弯头）。实测 r=3、R=20 → 1 个 torus 面 2368.705 mm²。"""
+    return elbow(pipe_radius, bend_radius, angle_deg=360.0, origin=origin, axis=axis, name=name)
 
 
 def cone_frustum(radius1, radius2, height, origin=(0.0, 0.0, 0.0), axis="z", name="Cone"):
@@ -1248,6 +1435,19 @@ def edge_summary(body):
     return out
 
 
+def _rule_filtered(rule):
+    """这条规则除了 rest/all 之外还有没有别的筛选条件。
+
+    有的话，rest 就只是"前面规则没用掉的里面再按这些条件筛"，而不是"剩下全要"。
+    """
+    for k in ("normal", "sign", "at", "between", "in_box", "area_min", "area_max",
+              "kind", "loops", "point", "nearest", "parallel", "perpendicular",
+              "axis", "length_min", "length_max", "smooth", "concave"):
+        if k in rule:
+            return True
+    return False
+
+
 def match_edges(body, rule, exclude=None):
     """按一条规则挑边。rule 是 dict，键可以任意组合（组合即取交集）：
 
@@ -1307,8 +1507,8 @@ def match_edges(body, rule, exclude=None):
     len_max = rule.get("length_max")
     want_smooth = rule.get("smooth")
     want_concave = rule.get("concave")
-    plain_rest = bool(rule.get("rest"))
-    take_all = bool(rule.get("all"))
+    plain_rest = bool(rule.get("rest")) and not _rule_filtered(rule)
+    take_all = bool(rule.get("all")) and not _rule_filtered(rule)
 
     out = []
     for e in body.Edges:
@@ -1807,8 +2007,8 @@ def match_faces(body, rule, exclude=None):
     want_loops = rule.get("loops")
     if want_loops is not None:
         want_loops = int(want_loops)
-    plain_rest = bool(rule.get("rest"))
-    take_all = bool(rule.get("all"))
+    plain_rest = bool(rule.get("rest")) and not _rule_filtered(rule)
+    take_all = bool(rule.get("all")) and not _rule_filtered(rule)
 
     out = []
     for f in body.Faces:

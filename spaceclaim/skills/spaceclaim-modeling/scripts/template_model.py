@@ -11,6 +11,7 @@
 #      faces_where() / faces_at() / faces_between()
 #      name_faces() / name_boundaries() / name_faces_by_rules()
 #      edge_summary() / edges_parallel() / edges_by_kind() / round_edges() / chamfer_edges()
+#      elbow() / elbows() / torus() / cone_frustum()
 #      save_model() / group_summary() / finish()
 #
 #  脚本里不用自己 new_model()：box()/cylinder() 会自动确保有文档
