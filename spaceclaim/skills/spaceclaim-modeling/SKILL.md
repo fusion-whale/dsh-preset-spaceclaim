@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d and the bend set in §1e.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e and `shell` in §1f.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -255,6 +255,34 @@ bends = elbows([
 
 **把弯头和直管拼成一个流体域**（实测）：直管用 `cylinder(...)` 与弯头**过盈 1mm** 就会并成一个体。代价是近相切并集必然留下 2 张 ~0.13 mm² 的微小面片（已归进 `wall`），总面数 7：inlet 28.27、outlet 28.27、两段直管壁各 405.27、圆环面 573.89、两张小面片各 0.13。
 
+## 1f. 抽壳（把实体掏成等壁厚的壳）
+
+```python
+cube = box(20.0, 20.0, 20.0, name="Shell")
+shell(cube, 2.0)                                         # 全封闭空腔：外表面不动，壁往内长
+shell(cup, 2.0, open_faces=faces_by_normal(cup, "z", 1)) # 顶面开口（像杯子）
+shell(duct, 2.0, open_faces=faces_by_normal(duct, "z", 1)
+                            + faces_by_normal(duct, "z", -1))  # 两端开口（像方管）
+shell(solid, 2.0, outward=True)                          # 原表面当内壁、壁往外长
+```
+
+**方向是最容易搞错的一点。** SpaceClaim 命令 `Shell.ShellBodies(body, offset)` 的原始语义是"**原来的表面变成空腔内壁，新面往外长**"——20mm 立方体传 `+2` 得到的是 **24×24×24** 的壳。`shell()` 默认取负号，也就是 CAD 里常规的"外表面不动、壁往内长"（20mm 立方体传 `2.0` 得到 20×20×20）。要用原始语义就 `outward=True`。
+
+实测基线（全部对着手算核过）：
+
+| 情形 | 面数 | 总面积 mm² | 包围盒 |
+|---|---|---|---|
+| 20 立方体、t=2、全封闭 | 12 | 3936.00 = 6×400(外) + 6×256(空腔 16³) | 20×20×20 |
+| 20 立方体、t=2、开口=顶面 | 11 | 3552.00 = 5×400 + 4×288(16×18) + 256 + 144(顶环) | 20×20×20 |
+| 20 立方体、t=2、开口=顶+底 | 10 | 3168.00 = 4×400 + 4×320(16×20) + 2×144 | 20×20×20 |
+| r10 h20 圆柱、t=2、全封闭 | 6 | 3091.33 = 1256.64 + 804.25(空腔 r8 h16) + 2×314.16 + 2×201.06 | 20×20×20 |
+| 20 立方体、t=2、`outward=True` | 12 | 5856.00 = 6×400 + 6×576 | **24×24×24** |
+
+两条硬约束：
+
+1. **`thickness` 必须 > 0**（传 0 底层直接抛错），而且**不能超过最小尺寸的一半**——20mm 立方体给 11 就失败。失败抛的是**中文** StandardError，库统一转成 ASCII 的 `RuntimeError`，并且按几何指纹确认"体确实没被动过"。
+2. **先抽壳、后命名。** 命名选择会**跟着几何走**，但去向不确定：实测对已经命名过的体做"删掉顶面 + 抽壳"，`pre_outlet` 被**重映射到新的顶面环**（144 mm²）；而换成正偏移（`outward`）时同一组会**整组消失**。所以别指望抽壳之后旧的命名还有意义。
+
 ## 2. Run it
 
 ```powershell
@@ -333,9 +361,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_external_flow.py" -Out "$S\tests\selftest_external_flow.scdocx" -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_fillet.py"        -Out "$S\tests\selftest_fillet.scdocx"        -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_elbow.py"         -Out "$S\tests\selftest_elbow.scdocx"         -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_shell.py"         -Out "$S\tests\selftest_shell.scdocx"         -Verify
 ```
 
-All sixteen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All seventeen must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -355,6 +384,7 @@ All sixteen must end in `[scdm] status=ok` and print the verify block. Regressio
 | `selftest_external_flow` | 1 body: `Domain 60x40x40` (7 faces) — the cylinder obstacle was absorbed as a void | inlet/outlet 1600 mm² @ (0,20,20)/(60,20,20) · obstacle 1256.64 mm² @ (30,20,20) · top/bottom_wall 2321.46 mm² @ z=40/z=0 · side_wall 2 faces × 2400 mm² |
 | `selftest_fillet` | 10 bodies: `RoundCube 20³` (26 faces / 48 edges — 24 line + 24 circle) · `RoundCubeZ 20³` (10 / 24) · `ChamferCube 20³` (26 / 48 lines) · `RoundTube 20x20x20` (8 / 8 circles) · `RoundedDuct 4x4x10` (10 / 24) · `RuleBox 20³` (26 / 56) · `ChamferTwo 20³` (10 / 24) · `FaceRound 20³` (10 / 20 — 16 line + 4 ellipse) · `TooBig 10³` (6 — r=9 refused, untouched) · `Stale 20³` (26) | cu_inlet/outlet 各 256.00 mm² @ (10,10,0)/(10,10,20) · cu_side 4 × 256.00 · cu_edge_fillet 12 × 50.27 · cu_corner 8 × 6.28 · cz_inlet/outlet 各 392.27 @ (40,10,0)/(40,10,20) · cz_fillet 4 × 94.25 · cz_side 4 × 280.00 · duct_inlet/outlet 各 15.14 @ (2,82,0)/(2,82,10) · duct_fillet 4 × 15.71 · duct_wall 4 × 20.00 |
 | `selftest_elbow` | 3 bodies: `Bend 44×44×6.009` (7 faces) · `Elbow45 4×12.021×7.808` (3) · `UTurn 28×14×4` (3) | Bend: inlet 28.27 @ (0,-21,0) · outlet 28.27 @ (-41,20,0) · bend_wall 573.89 · wall 4 faces (405.27 / 405.27 / 0.13 / 0.13) · Elbow45: e45_inlet 12.57 @ (0,60,0) · e45_wall 148.04 · e45_outlet 12.57 · UTurn: uturn_inlet 12.57 @ (0,120,0) · uturn_wall 473.74 · uturn_outlet 12.57 @ (-24,120,0) |
+| `selftest_shell` | 7 bodies: `HollowCube 20³` (12 faces) · `OpenCup 20³` (11) · `OpenDuct 20³` (10) · `HollowCyl 20×20×20` (6 — 4 plane + 2 cylinder) · `Outward 24³` (12) · `TooThick 20³` (6 — t=11 refused, untouched) · `PreNamed 20³` (11) | hollow_outer 6 × 400.00 · hollow_cavity 6 × 256.00 @ ±2 · cup_rim 144.00 @ (50,10,20) · cup_outer 5 × 400.00 · cup_inner 5 面 · duct_rim/duct_rim2 各 144.00 @ z=20/z=0 · duct_outer 4 × 400.00 · duct_inner 4 × 320.00 · pre_outlet 被重映射成 144.00 |
 
 Run these before blaming a new model script.
 

@@ -1729,6 +1729,79 @@ def round_outer_rims(body, radius, axis="z"):
 
 
 # ---------------------------------------------------------------------------
+# 抽壳（Shell）：把实体掏空成等壁厚的壳
+#
+# 官方脚本命令，本机 2022 R1 实测可用：
+#   Shell.ShellBodies(ISelection body, Double offset, ICommandInfo info)    -- 整体掏空
+#   Shell.RemoveFaces(ISelection faces, Double offset, ICommandInfo info)   -- 删掉这些面再掏空
+# 两处的 ICommandInfo 传 None 都安全。
+#
+# **方向是关键：offset 为正时，原来的表面变成"空腔内壁"，新面往外长。**
+#   实测 20mm 立方体 +2 -> 包围盒变成 24x24x24，原来 6 张 400 面法向翻转、成了空腔内壁，
+#   外侧新增 6 张 576 面（= 24x24）。
+# 想要 CAD 里常规的"外表面不动、壁往内长"，要传**负值**：
+#   实测 20mm 立方体 -2 -> 12 个面、总面积 3936 = 6x400(外) + 6x256(16^3 空腔)，
+#   包围盒仍是 20x20x20。所以下面的 shell() 默认取负号。
+#
+# 另外两条实测结论：
+#   * offset = 0、以及"壁厚超过体最小尺寸的一半"，都抛 **中文** StandardError。
+#     非 ASCII 异常一旦逃出脚本就会让宿主静默中止，所以这里一律转成 ASCII 的 RuntimeError。
+#   * 对**已经命名过的面**做 RemoveFaces 会把那个命名选择打空（实测 outlet 组直接消失）。
+#     顺序永远是"先抽壳、后命名"。
+# ---------------------------------------------------------------------------
+
+def shell(body, thickness, open_faces=None, outward=False):
+    """抽壳：把实体掏成等壁厚的壳，返回同一个体。
+
+    body       要掏空的实体
+    thickness  壁厚，单位 mm，必须 > 0
+    open_faces 要"开口"的面（单张面或面列表）；**不传就是全封闭的空腔**
+    outward    False（默认）= 外表面不动、壁往**内**长（CAD 常规语义）
+               True          = 原表面当内壁、壁往**外**长（SpaceClaim 命令的原始语义）
+
+    实测基线：
+      * 20mm 立方体、t=2、全封闭 -> 12 个面，总面积 3936.00
+        = 6x400（外，20^3）+ 6x256（空腔，16^3），包围盒 20x20x20
+      * 20mm 立方体、t=2、开口面 = 顶面 -> 11 个面，总面积 3552.00
+        = 5x400（外）+ 4x288（空腔壁 16x18）+ 256（空腔底 16x16）+ 144（顶部环形口）
+      * r=10 h=20 圆柱、t=2、全封闭 -> 6 个面，总面积 3091.33
+        = 1256.64(外柱面) + 804.25(空腔柱面 r8 h16) + 2x314.16(外端面) + 2x201.06(空腔端面)
+      * 20mm 立方体、t=2、开口 = 顶面+底面 -> 10 个面，总面积 3168.00
+        = 4x400(外) + 4x320(空腔壁 16x20) + 2x144(上下两个环形口)
+    """
+    t = float(thickness)
+    if t <= 0.0:
+        raise ValueError("shell: thickness must be > 0 mm")
+    offset = MM(t if outward else -t)
+
+    faces = None
+    if open_faces is not None:
+        if isinstance(open_faces, (list, tuple)):
+            faces = [f for f in open_faces]
+        else:
+            faces = [open_faces]
+        if not faces:
+            faces = None
+
+    before = _model_signature()
+    try:
+        if faces is not None:
+            Shell.RemoveFaces(Selection.Create(faces), offset, None)
+        else:
+            Shell.ShellBodies(Selection.Create(body), offset, None)
+    except:
+        raise RuntimeError(
+            "shell failed: SpaceClaim refused the offset. The wall thickness is probably too "
+            "large for this body (more than half of its smallest dimension), or an open face "
+            "was named that cannot be removed.")
+    after = _model_signature()
+    if before == after:
+        raise RuntimeError("shell: SpaceClaim reported success but the geometry did not change "
+                           "(identical body/face count and total area)")
+    return body
+
+
+# ---------------------------------------------------------------------------
 # 命名选择（Named Selection）
 # ---------------------------------------------------------------------------
 
