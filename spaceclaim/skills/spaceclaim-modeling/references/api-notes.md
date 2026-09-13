@@ -570,6 +570,32 @@ Sweep.Execute(轮廓选择, 路径选择, SweepCommandOptions(), ICommandInfo)
 重试上面第 3 种（几何上正确的）配置：**两种都返回 `Success=False` 且毫无几何变化**。
 也就是说这个返回值两种情况都不可信，只能靠体数/面数变化判成败。
 
+### 15.2 最后一条没试过的路也试完了：路径用「实体的边」（第 17 轮，仍然不通）
+
+第 15 节末尾留的"下次接着做"是"把路径做成实体的边而不是草图曲线"。已经做完，**结论一样：不通。**
+
+精确签名（反射）：
+
+```
+Sweep.Execute(ISelection selection, ISelection trajectories, SweepCommandOptions options, ICommandInfo info)
+Sweep.Execute(ISelection selection, ISelection trajectories, Double distance, SweepCommandOptions options, ICommandInfo info)
+SweepCommandOptions : GeometryCommandOptions     // 自己声明的只有 SweepNormalTrajectory / ExtrudeType
+```
+
+试过的组合（判定一律看体数/面数变化，不看 `Success`）：
+
+| # | 轮廓 | 路径 | `Success` | 实际结果 |
+|---|---|---|---|---|
+| 5 | 圆柱端面（法向 X） | 长方体的直边（沿 X，起点与轮廓同平面） | True | **面数 8→8，毫无变化** |
+| 6 | 同上 | 同上，`SweepNormalTrajectory=True` | True | 同上，无变化 |
+| 7 | 圆柱端面（法向 Z） | 圆柱的一圈**圆边**（torus 式弯管） | **False** | 面数 5→5 |
+| 8 | 圆盘面（x=+1 那侧） | 长方体的直边 | True | 面数 9→9 |
+
+**最终结论：这个版本（2022 R1 / v221）的 `Sweep` 在脚本里就是不能用**——
+草图曲线路径、实体边路径、直边、圆边、两个 `SweepNormalTrajectory` 取值、
+轮廓给面/给草图区域都试过了，结果不是"无变化"就是 `Success=False`。
+**弯管请直接用 §20 的 `elbow()` / `torus()`（草图圆 + 回转），不要再碰 Sweep。**
+
 ## 16. 球体与布尔减的差异（第 12 个回归用例实测）
 
 ```
