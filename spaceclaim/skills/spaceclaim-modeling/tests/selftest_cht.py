@@ -120,7 +120,27 @@ for k in sorted(groups.keys()):
 print("[c] hand-calc: shell_wall=4、tube_wall_end=%d、shell_tube_a/b=%d、tube_inlet/outlet=%d"
       % (2 * NTUBE, NTUBE, NTUBE))
 
-# --- 6) 失败路径：建重名 zone 会怎样（记录现象，不让它崩掉整个脚本） ----
+# --- 6) 逐体配对统计 + 孤立体检测 ---------------------------------------
+print("[c] shell 侧逐体: %s" % str(interface_pairing_by_body(shell, tube_walls)))
+rows = interface_pairing_by_body(tube_walls, shell)
+print("[c] 管壁侧逐体: 共 %d 根，每根配 %s 张面"
+      % (len(rows), str(sorted(set([r[1] for r in rows])))))
+print("[c]   每根配上的面积 = %s mm²（手算 %.2f）"
+      % (str(sorted(set([round(r[2], 2) for r in rows]))),
+         PI * ((R_OUT * 2) ** 2 - (R_IN * 2) ** 2) / 4.0 * 0 + 2 * PI * R_OUT * L))
+
+# 故意放一根"只插进去一半"的管子（x 20..80，孔是 0..100）
+misplaced = tube(R_OUT, R_IN, L,
+                 origin=(20.0, Y0, Z0), axis="x",
+                 name="MisplacedTube", separate=True)
+gap = interface_gaps([tube_walls[0], misplaced], shell)
+print("[c] 孤立体检测（好管 + 半插进去的管 vs 壳程）:")
+print("[c]   a 侧没配上的: %s" % str([_ascii(b.Name) for b in gap["a"]]))
+print("[c]   b 侧没配上的: %s" % str([_ascii(b.Name) for b in gap["b"]]))
+print("[c]   两边的语义：A 侧的**坏管**被点名；B 侧为空是因为壳体的 4 张孔壁里有 1 张配上了 ——")
+print("[c]   interface_gaps 是**按体**判的（一张面都没配上的体），不是按面判的")
+
+# --- 7) 失败路径：记录 shell_inlet 的面积 -------------------------------
 print("[c] shell_inlet 的面积 = %.2f（手算 %.2f）"
       % (sum([face_area(m) for g in NamedSelection.GetGroups()
               if _ascii(g.Name) == "shell_inlet" for m in g.Members]),

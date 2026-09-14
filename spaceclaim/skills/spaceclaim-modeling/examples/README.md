@@ -3,6 +3,28 @@
 这些都是**真跑过、独立校验过**的配方（用 `-Verify` 另开一个 SpaceClaim 会话从磁盘回读）。
 数字都是实测值，可以拿来对照自己建出来的结果。
 
+**一条命令跑完全部 5 个并打印对照表：**
+
+```powershell
+& "<skill-dir>\scripts\smoke_examples.ps1"                # 全过才返回 0
+& "<skill-dir>\scripts\smoke_examples.ps1" -Only pin_fin_demo
+& "<skill-dir>\scripts\smoke_examples.ps1" -Retries 2     # 偶发失败自动重试
+```
+
+实测输出（SpaceClaim 2022 R1，本机）：
+
+```
+Example              Status Bodies Zones Faces Seconds
+tube_bank_demo       ok     1      8     44       41.5
+pin_fin_demo         ok     1      7     86       40.7
+surface_asm_demo     ok     3      3     6        89.1
+bend90_demo          ok     1      4     7        51.4
+cht_tube_bundle_demo ok     25     10    18       41.3
+total 5, failed 0
+```
+
+也可以逐个手动跑：
+
 ```powershell
 $S = "<skill-dir>"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\examples\tube_bank_demo.py"    -Out "$S\examples\tube_bank_demo.scdocx"    -Verify

@@ -3070,6 +3070,74 @@ def interface_report(bodies_a, bodies_b, tol=1e-3, tol_loose=1.0, find_suspects=
     }
 
 
+def _face_body_map(bodies):
+    """{面 Moniker: 体} —— 把面归属到体。
+
+    不要用 `face.Body`：DesignFace 上的这个属性取到的是**原始 Modeler Body**，
+    它的 Moniker 和 DesignBody 的对不上（实测逐体统计因此全是 0）。
+    自己按面建索引最稳。
+    """
+    m = {}
+    for b in _as_body_list(bodies):
+        try:
+            for f in b.Faces:
+                m[_face_key(f)] = b
+        except:
+            pass
+    return m
+
+
+def interface_pairing_by_body(bodies_a, bodies_b, tol=1e-3):
+    """逐体统计配对情况，返回 [(体名, 面数, 面积 mm²), ...]（按 bodies_a 的传入顺序）。
+
+    用来回答"这 12 根管子是不是每根都配上了"——只看到一个 `pairs=11` 是查不出
+    是哪一根没配的，这个表能直接点名。
+    """
+    pairs = find_coincident_pairs_multi(bodies_a, bodies_b, tol)
+    fmap = _face_body_map(list(_as_body_list(bodies_a)) + list(_as_body_list(bodies_b)))
+    got = {}
+    for (fa, fb) in pairs:
+        for f in (fa, fb):
+            b = fmap.get(_face_key(f))
+            if b is None:
+                continue
+            k = _body_key(b)
+            rec = got.get(k)
+            if rec is None:
+                got[k] = [0, 0.0]
+                rec = got[k]
+            rec[0] += 1
+            rec[1] += face_area(f)
+    out = []
+    for b in _as_body_list(bodies_a):
+        rec = got.get(_body_key(b))
+        out.append((_ascii(b.Name), 0 if rec is None else rec[0],
+                    0.0 if rec is None else rec[1]))
+    return out
+
+
+def interface_gaps(bodies_a, bodies_b, tol=1e-3):
+    """**一张交界面面都没配上**的体 —— 返回 {"a": [体, ...], "b": [体, ...]}。
+
+    这是最该盯的一条：管束里某根管子位置放错、或者某个固体域根本没贴上流体域，
+    `pairs` 只会少一个数（12 变成 11），而这里会把那根管子**点名**出来。
+    """
+    pairs = find_coincident_pairs_multi(bodies_a, bodies_b, tol)
+    fmap = _face_body_map(list(_as_body_list(bodies_a)) + list(_as_body_list(bodies_b)))
+    hit = {}
+    for (fa, fb) in pairs:
+        for f in (fa, fb):
+            b = fmap.get(_face_key(f))
+            if b is not None:
+                hit[_body_key(b)] = 1
+    gaps = {"a": [], "b": []}
+    for key, group in (("a", _as_body_list(bodies_a)), ("b", _as_body_list(bodies_b))):
+        for b in group:
+            if _body_key(b) not in hit:
+                gaps[key].append(b)
+    return gaps
+
+
 def name_interfaces_multi(bodies_a, bodies_b, prefix="interface", grouped=True, tol=1e-3):
     """跨**多个体**命名交界面，返回配对数。
 

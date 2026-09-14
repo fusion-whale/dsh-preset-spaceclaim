@@ -1247,6 +1247,48 @@ interface 报错。
 （再拿它取 `Faces` 抛 `The object is deleted.`）。现在按 Moniker 重新取一次再返回。
 同时给它加了 `separate=False` 参数（见上面第 1 条）。
 
+### 25.6 逐体配对统计与孤立体检测
+
+`find_coincident_pairs_multi` 只给一个总数，查不出"是哪一根管子没配上"。补两个：
+
+```
+interface_pairing_by_body(bodies_a, bodies_b, tol=1e-3) -> [(名字, 面数, 面积 mm²), ...]
+interface_gaps(bodies_a, bodies_b, tol=1e-3)            -> {"a": [体, ...], "b": [体, ...]}
+```
+
+实测（第 20 个用例，4 根管）：
+
+| 调用 | 结果 |
+|---|---|
+| `interface_pairing_by_body(shell, tube_walls)` | `[('ShellSide', 4, 6031.86)]` —— 壳体 4 张孔壁全配上 |
+| `interface_pairing_by_body(tube_walls, shell)` | 4 根，每根 `1` 张面、`1507.96 mm²`（= 2π·4·60，与手算一致） |
+| 把一根管子只插进去一半（x 20..80，孔是 0..100）后 `interface_gaps([good, misplaced], shell)` | `{"a": ["MisplacedTube"], "b": []}` —— **坏管被点名** |
+
+**踩过的坑**：这两个函数一开始用 `face.Body` 做归属，结果**每一行都是 0**。
+原因是 DesignFace 上的 `.Body` 取到的是**原始 Modeler Body**，它的 Moniker 和
+DesignBody 的对不上，`_body_key()` 落到 `str(id())` 的兜底分支、于是永远匹配不上。
+现在改成自己按 `_face_key` 建"面 → 体"索引（`_face_body_map`）。
+
+另外 `interface_gaps` 是**按体**判的：壳体在只配上一张孔壁时**不算孤立体**，
+它只报告"一张面都没配上的体"。
+
+### 25.7 `scripts/smoke_examples.ps1`
+
+一条命令跑完全部示例（建模 + 另开会话回读校验），最后打印表格，全过才返回 0。
+支持 `-Only <名字>` 与 `-Retries N`。实测输出：
+
+```
+Example              Status Bodies Zones Faces Seconds
+tube_bank_demo       ok     1      8     44       41.5
+pin_fin_demo         ok     1      7     86       40.7
+surface_asm_demo     ok     3      3     6        89.1
+bend90_demo          ok     1      4     7        51.4
+cht_tube_bundle_demo ok     25     10    18       41.3
+total 5, failed 0
+```
+
+这是回归之外的**端到端冒烟**：换一台机器先把 SpaceClaim 装好，跑这个就知道能不能用。
+
 
 
 

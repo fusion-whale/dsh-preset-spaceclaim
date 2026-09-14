@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `all_components` / `component_children` / `explode_to_components` / `assembly_summary` in §1h, and `name_interfaces_multi` / `interface_report` / `find_coincident_pairs_multi` in §1j.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `all_components` / `component_children` / `explode_to_components` / `assembly_summary` in §1h, and `name_interfaces_multi` / `interface_report` / `interface_pairing_by_body` / `interface_gaps` / `find_coincident_pairs_multi` in §1j, plus the `smoke_examples.ps1` one-command example run in §1k.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -456,6 +456,31 @@ print(r["pairs"], r["area_a"], r["area_b"], r["balanced"])
 4. **同名的 zone 一定要合并着建。** 对 12 根管子分别调 `name_faces_by_rules(t, [("tube_wall_end", …)])` 会建出 12 组同名 zone，随后 `NamedSelection.GetGroups()` **直接崩掉**。正确做法是把 12 根的面先收集到一个列表，最后 `name_faces("tube_wall_end", faces)` 命名一次。
 
 另外**两侧交界面的长度必须一致**：管壁比壳程长 10mm 的话两侧面积变成 3455.75 vs 3141.59，`balanced=False` 会当场报出来。
+
+### 逐体统计与孤立体检测
+
+`pairs` 只少一个数是查不出"是哪一根管子没配上"的，所以还有两个函数：
+
+```python
+rows = interface_pairing_by_body(tube_walls, shell)   # [(体名, 配上的面数, 面积), ...]
+# [('TubeWall', 1, 1507.96), ('TubeWall', 1, 1507.96), ...]  每根一张面
+
+gap = interface_gaps([tube_walls[0], misplaced], shell)       # 一张面都没配上的体
+# {"a": [MisplacedTube], "b": []}
+```
+
+- `interface_pairing_by_body` 按传入顺序逐体给出**面数 + 面积**，一眼看出哪根没配上、哪根面积不对。
+- `interface_gaps` 按**体**判"一张交界面都没配上"。实测把一根管子只插进去一半（x 20..80、孔是 0..100）时它被点名；而壳体那边即使 4 张孔壁只配上 1 张也**不算孤立体**——它是按体判的，不是按面判的，这点要知道。
+
+## 1k. 一条命令跑完所有示例
+
+```powershell
+& "<skill-dir>\scripts\smoke_examples.ps1"                 # 全部 5 个示例
+& "<skill-dir>\scripts\smoke_examples.ps1" -Only tube_bank_demo
+& "<skill-dir>\scripts\smoke_examples.ps1" -Retries 2      # 偶发失败自动重试
+```
+
+每个示例都是"建模 + 另开会话回读校验"，最后打印一张表（体数 / zone 数 / 首体面数 / 耗时），全过才返回 0。它也是回归之外的**端到端冒烟**：在新机器上装好 SpaceClaim 之后先跑这个，就知道这套东西能不能用。
 
 ## 2. Run it
 
