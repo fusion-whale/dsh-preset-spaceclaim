@@ -2986,6 +2986,15 @@ def _face_contains(big, small, tol=1e-3):
     """
     if face_kind(big) != face_kind(small):
         return False
+    # 大面必须是一张**没有内环**的面。带内环的面（板端面上被通道穿出的那些孔）
+    # 包围盒照样能罩住小面，但小面其实落在孔里、并不贴着材料 ——
+    # 实测：PCHE 里流体域的半圆端面就被误配到了固体端面上（多出 4 对假交界面、
+    # 面积多算 6.28mm²）。带孔的面直接不做包含判定，这类假阳性一刀切掉。
+    try:
+        if len(list(_shape_of(big).Loops)) != 1:
+            return False
+    except:
+        return False
     lb, hb = face_extent(big)
     ls, hs = face_extent(small)
     for k in range(3):
@@ -3399,6 +3408,69 @@ def cht_check(layers, tol=1e-3, allow_split=True, min_coverage=0.9):
         "low_coverage": low_coverage,
         "ok": (len(isolated) == 0 and len(low_coverage) == 0),
     }
+
+
+def half_round_channel(radius, length, origin, axis="x", flat="+y", name="Channel"):
+    """**D 形（半圆）通道体** —— 平的一侧朝 flat 指定的方向，弧朝另一侧。
+
+    origin 是**平的那一面**的中心；通道从该面向 flat 的反方向鼓出 radius。
+    实测用法（PCHE 的刻槽通道）：平的一侧朝上，就是半圆槽 + 上方盖板的形式。
+
+    **为什么要绕一圈**：`cut=True` 是**全局**的，没法只切某一个体 —— 直接在目标位置
+    把整圆柱砍一半，会把周围固体一起砍掉。而 `move()` 是刚体变换、**不会并集**。
+    所以这里先把整圆柱造在**文档包围盒之外的空白处**，在那儿切掉一半（那时文档里
+    只有它），再搬回目标位置。这个套路在 `_copy_body` 里也用过。
+
+    限制：`axis` 不能与 `flat` 的方向相同（比如 axis="y" 配 flat="+y"）。
+    """
+    ensure_document()
+    a = str(axis).lower()
+    if a not in ("x", "y", "z"):
+        raise ValueError("half_round_channel: axis must be 'x'/'y'/'z'")
+    f = str(flat).lower()
+    if f not in ("+y", "-y", "+z", "-z"):
+        raise ValueError("half_round_channel: flat must be '+y'/'-y'/'+z'/'-z'")
+    fdir = 1.0 if f[0] == "+" else -1.0
+    facis = f[1]
+    if facis == a:
+        raise ValueError("half_round_channel: axis and flat must be different directions")
+
+    x0, y0, z0 = origin
+    # 1) 挑一块空白：沿 +X 推到文档包围盒之外
+    hi = None
+    for b in all_bodies():
+        e = body_extent(b, "x")
+        if hi is None or e[1] > hi:
+            hi = e[1]
+    shift_x = 0.0 if hi is None else (hi + 20.0 - x0)
+    ox = [x0 + shift_x, y0, z0]
+
+    c = cylinder(radius, length, origin=(ox[0], ox[1], ox[2]), axis=a,
+                 name=name, separate=True)
+
+    # 2) 在空白处切掉 flat 那一半：盒子只罩住"要切走"的那半边
+    ia = _axis_index(a)
+    ifa = _axis_index(facis)
+    it = 3 - ia - ifa                      # 与两者都垂直的那一维
+    lo = [0.0, 0.0, 0.0]
+    hi3 = [0.0, 0.0, 0.0]
+    lo[ia] = ox[ia] - 10.0
+    hi3[ia] = ox[ia] + float(length) + 10.0
+    if fdir > 0:
+        lo[ifa] = ox[ifa]
+        hi3[ifa] = ox[ifa] + 2.0 * radius + 1.0
+    else:
+        lo[ifa] = ox[ifa] - 2.0 * radius - 1.0
+        hi3[ifa] = ox[ifa]
+    lo[it] = ox[it] - radius - 1.0
+    hi3[it] = ox[it] + radius + 1.0
+    box(hi3[0] - lo[0], hi3[1] - lo[1], hi3[2] - lo[2],
+        origin=(lo[0], lo[1], lo[2]), cut=True)
+
+    # 3) 搬回目标位置（刚体变换，不会并集）
+    if abs(shift_x) > 1e-9:
+        move(c, -shift_x, 0.0, 0.0)
+    return c
 
 
 def name_interfaces_multi(bodies_a, bodies_b, prefix="interface", grouped=True,

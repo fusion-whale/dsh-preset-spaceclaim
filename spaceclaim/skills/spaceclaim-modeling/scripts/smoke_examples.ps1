@@ -29,7 +29,7 @@ $exDir = Join-Path $root 'examples'
 if (-not (Test-Path $runner)) { Write-Error "runner not found: $runner"; exit 2 }
 if (-not (Test-Path $exDir)) { Write-Error "examples not found: $exDir"; exit 2 }
 
-$all = @('tube_bank_demo', 'pin_fin_demo', 'surface_asm_demo', 'bend90_demo', 'cht_tube_bundle_demo', 'cht_baffled_demo', 'fuel_assembly_5x5')
+$all = @('tube_bank_demo', 'pin_fin_demo', 'surface_asm_demo', 'bend90_demo', 'cht_tube_bundle_demo', 'cht_baffled_demo', 'fuel_assembly_5x5', 'pche_demo')
 $names = if ($Only.Count -gt 0) { $Only } else { $all }
 
 $rows = @()

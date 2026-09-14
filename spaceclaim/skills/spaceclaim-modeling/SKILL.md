@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `all_components` / `component_children` / `explode_to_components` / `assembly_summary` in §1h, and `name_interfaces_multi` / `interface_report` / `interface_pairing_by_body` / `interface_gaps` / `find_coincident_pairs_multi` in §1j, plus `interface_graph` / `interface_neighbours` / `cht_check` in §1j and the `smoke_examples.ps1` one-command example run in §1l.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `all_components` / `component_children` / `explode_to_components` / `assembly_summary` in §1h, and `name_interfaces_multi` / `interface_report` / `interface_pairing_by_body` / `interface_gaps` / `find_coincident_pairs_multi` in §1j, plus `interface_graph` / `interface_neighbours` / `cht_check` in §1j `half_round_channel` in §1m, and the `smoke_examples.ps1` one-command example run in §1l.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -544,6 +544,59 @@ print(r["pairs"], r["split_pairs"], r["split_area_a"], r["area_a"])
 ```
 
 每个示例都是"建模 + 另开会话回读校验"，最后打印一张表（体数 / zone 数 / 首体面数 / 耗时），全过才返回 0。它也是回归之外的**端到端冒烟**：在新机器上装好 SpaceClaim 之后先跑这个，就知道这套东西能不能用。
+
+## 1m. D 形（半圆）通道与 PCHE 配方
+
+PCHE（印刷电路板式换热器）的通道是**刻在板面上的半圆槽 + 上面盖板压合**，截面就是 D 形。
+`half_round_channel()` 专门造这个形状：
+
+```python
+ch = half_round_channel(radius=1.0, length=100.0, origin=(0, 1.6, 1.6),
+                        axis="x", flat="+y", name="HotFluid")
+# origin 是**平的那一面**的中心；通道朝 flat 的反方向鼓出 radius
+```
+
+**为什么需要这个函数（不这么做会撞墙）**：`cut=True` 是**全局**的，没法只切某一个体 ——
+想直接造一个半圆柱，就得在目标位置把整圆柱砍一半，而那一刀会把周围的固体一起砍掉。
+绕过去的办法是：**先把整圆柱造在文档包围盒之外的空白处，在那儿切掉一半（那时文档里只有它），
+再用 `move()` 搬回目标位置** —— `move()` 是刚体变换、**不会并集**。这个套路在 `_copy_body`
+里也用过（那里是为了避免复制品并进邻居）。
+
+### 完整配方（`examples/pche_demo.py`）
+
+```
+① 浇 1.6mm 热板（box）              -> 文档里只有它，切槽不会伤到别人
+② 切热通道的 D 形槽                  -> 刀心正好落在板上表面，只切掉下半 = 真半圆
+③ 浇 1.6mm 冷板（与热板并成一个固体）
+④ 切冷通道的 D 形槽                  -> 冷槽在板上部，热槽 y 0.6~1.6 不受影响
+⑤ 浇 0.6mm 盖板把冷通道盖住          -> 固体域 1 个体、4 条封闭 D 形通道
+⑥ half_round_channel() 造 4 条流体域 -> 空白处造好再 move 进来
+```
+
+步骤 ②④ 能成立的关键：**刀心正好落在被切体的上表面**，刀的上一半在体外，
+所以切出来的是真半圆（解析曲面），而不是"整圆孔"。
+
+尺寸（按真实 PCHE 量级）：通道半径 1.0mm、同层栅距 2.4mm、刻槽板 1.6mm、盖板 0.6mm、
+冷热错开半栅距 1.2mm → **冷热之间只剩 0.6mm 的换热薄壁**。
+
+实测：
+
+| 项 | 数值 |
+|---|---|
+| 体数 | 5 = 1 固体（14 面）+ 2 热流体 + 2 冷流体（各 4 面） |
+| D 形截面 | 面积 **1.5708 mm²**、湿周 **5.1416 mm**、**Dh = 1.2220 mm** |
+| 交界面 | hot / cold 各 4 对（每条通道：半圆弧面 314.16 + 平顶面 200）→ 两侧各 **1028.32 mm²**、`balanced=True` |
+| 固体体积 | **1955.68 mm³** = 100×3.8×6.8 − 4×157.08 |
+| `cht_check` | `ok=True`，且**正确判定热↔冷不接触**（中间隔着固体） |
+
+### 分段匹配的一个假阳性（已修）
+
+`interface_report(..., allow_split=True)` 一开始把流体域的**半圆端面**也配成了交界面 ——
+它和固体端面共面、包围盒也被罩住，但它其实落在固体端面的**孔里**、并不贴着材料
+（实测多出 4 对假交界面、面积多算 6.28 mm²）。
+
+修法：**大面必须是一张没有内环的面**（`Loops.Count == 1`）。带孔的面直接不做包含判定 ——
+在这种面上"包围盒罩住"和"贴着材料"根本不是一回事。
 
 ## 2. Run it
 
