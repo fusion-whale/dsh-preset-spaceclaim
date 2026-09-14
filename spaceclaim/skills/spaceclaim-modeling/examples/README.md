@@ -33,10 +33,12 @@ $S = "<skill-dir>"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\examples\bend90_demo.py"       -Out "$S\examples\bend90_demo.scdocx"       -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\examples\cht_tube_bundle_demo.py" -Out "$S\examples\cht_tube_bundle_demo.scdocx" -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\examples\cht_baffled_demo.py"      -Out "$S\examples\cht_baffled_demo.scdocx"      -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\examples\fuel_assembly_5x5.py"    -Out "$S\examples\fuel_assembly_5x5.scdocx"    -Verify
 ```
 
 | 示例 | 是什么 | 用到的能力 | 实测结果 |
 |---|---|---|---|
+| `fuel_assembly_5x5.py` | **5×5 核反应堆燃料组件流动通道**：75×75 通道挖 25 根棒（棒径 10 / 栅距 15，P/D=1.5），长 3000mm；边界条件 `wall-heated`（棒表面）/ `sym`（四周）/ `inlet`（底面）/ `outlet`（顶面）。脚本里还留了"棒径=栅距"为什么建不出来的反面教材 | `box(cut=True)` 循环 / 规则命名 | 1 个体 **31 面**（6 平面 + 25 圆柱面）；inlet/outlet 各 **3661.50 mm²**、`wall-heated` **2356194.49 mm² = 2.3562 m²**（25×2π·5×3000）、`sym` **900000 mm² = 0.9 m²**；**流通面积 3661.50 mm²、湿周 1085.40 mm、Dh = 13.4937 mm** |
 | `cht_baffled_demo.py` | **带折流板的四层 CHT**：壳程流体 100×50×40 + 2 块折流板固体 + 12 根管壁 + 12 根管程流体；折流板上的管孔是同一轮 `cut` 挖穿的 | `box(cut=True)` 顺序技巧 / `tube(separate=True)` / `cht_check` / `name_interfaces_multi(allow_split=True)` | **27 个体**；`cht_check ok=True`，自动判定 4 组相接（壳程↔折流板 6 / 壳程↔管壁 3整+18分段 / 折流板↔管壁 9分段 / 管壁↔管程 12），并正确判定壳程↔管程不接触 |
 | `cht_tube_bundle_demo.py` | **共轭传热三层模型**：壳程流体 100×50×40 + 12 根管壁固体（外 r5/内 r4）+ 管程流体 12 根 r4 | `box` / `cylinder(cut=True)` / `tube(separate=True)` / `name_interfaces_multi` / `interface_report` | **25 个体、10 个 zone**；`shell_tube_a/b` 各 12 面、两侧各 37699.11 mm²；`tube_fluid_a/b` 各 12 面、两侧各 30159.29；两处 `balanced=True` |
 | `tube_bank_demo.py` | 管壳式换热器**壳程流域**：100×50×40 的壳 + 12 根贯穿换热管 + 2 块弓形折流板 | `box` / `cylinder(cut=True)` / `box(cut=True)` / 规则命名 | 44 个面（20 平面 + 24 圆柱面）；进口/出口各 1396.81 mm²、折流板 4 面各 823.01、管壁合计 29405.31、壁面 14 面 17664.00 |
