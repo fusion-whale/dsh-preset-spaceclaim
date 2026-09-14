@@ -1294,3 +1294,89 @@ total 5, failed 0
 
 
 
+
+## 26. 自动分层检查与分段交界面（第 21 个回归用例）
+
+### 26.1 `cht_check`：不用指定哪两层相接
+
+```
+interface_graph(bodies, tol=1e-3)        -> {体键: [(邻体键, 面数, 面积), ...]}
+interface_neighbours(bodies, tol=1e-3)   -> {(体名[#序号]): [(邻体名, 面数, 面积), ...]}
+cht_check(layers, tol=1e-3, allow_split=True, min_coverage=0.9) -> dict
+```
+
+`layers` 是有序的 `[(层名, [体...]), ...]`；`cht_check` 对**每一对层**自动算交界面，
+返回 `pairs`（逐层对的 interface_report）/ `touching` / `not_touching` /
+`isolated_bodies`（一张交界面都没配上的体，点名）/ `layer_stats` / `low_coverage` / `ok`。
+
+实测（第 21 个用例：壳程 60×36×24 + 1 块折流板 + 4 根管 r4/r3）：
+
+| 层对 | pairs | split_pairs | 面积 mm² | 手算 |
+|---|---|---|---|---|
+| shell_fluid ↔ tube_wall | 2 | **4** | 5931.33 | 4×60 − 2×2 = 236mm → 2π·4·236 |
+| shell_fluid ↔ baffle_solid | 3 | 0 | 566.94 | 2×(15×24 − 2π·4²) + 2×24 |
+| baffle_solid ↔ tube_wall | 0 | **2** | 100.53 | 2 孔 × 2π·4·2 |
+| tube_wall ↔ tube_fluid | 4 | 0 | 4523.89 | 4 × 2π·3·60 |
+| shell_fluid ↔ tube_fluid | — | — | — | **正确地判为"不接触"**（中间隔着管壁） |
+
+三个意外但正确的结果：
+
+1. **壳程↔管壁只配到 2 张整面**：穿过折流板的那 2 根管，它的孔壁被切成 2 段，
+   整面面积对不上 → 走分段匹配，得到 4 对。合计 6 对 ✓
+2. **壳程↔折流板是 3 对不是 2 对**：除了 2 张板面，折流板的**底面**（2×24=48）
+   正好被壳程底面那片墙包住 → 也被算成一处分段接触。物理上折流板就是焊在壳体上的，
+   这条是对的；不想让它算交界面就把折流板两端留 0.5mm 间隙。
+3. **折流板↔管壁 100.53 = 2×2π·4·2**：折流板上的管孔（2mm 长的圆柱环带）被管壁
+   外表面整面包住 → 2 对分段接触 ✓
+
+### 26.2 分段交界面：`_face_contains` 与 `allow_split`
+
+**为什么需要**：管束里插了折流板之后，壳程那侧的管孔壁被切成几段
+（每根管少 2mm×折流板数），而管壁外表面还是完整的一根 100mm 圆柱面 ——
+`find_coincident_pairs_multi` 的"面心 + 面积"判据一个都配不上，`pairs` 会是 **0**。
+
+```
+find_coincident_pairs_multi(a, b, tol, allow_split=False)
+interface_report(a, b, ..., allow_split=False)
+name_interfaces_multi(a, b, prefix, grouped=True, tol, allow_split=False)
+```
+
+分段匹配的判定（`_face_contains(big, small)`）：
+
+* 类型相同、small 的解析包围盒被 big 包住；
+* **平面**：两者法向平行，且 small 的面心落在 big 的平面上；
+* **圆柱**：取 big 最长方向当轴向，剩下两个方向的尺寸必须和 small 一致 ——
+  **故意不读 `Geometry.Radius` / `Frame`**：实测那组反射取不到时会静默 `except` 掉、
+  整条判定永远返回 False（第一版就是这么错的，18 段一段都没配上）。
+
+要点：
+
+* split 遍**允许一张大面被多张小面共用**（一根管壁外表面会被好几段孔壁同时贴着），
+  只对 small 侧去重；`name_interfaces_multi` 命名时对 B 侧再按面去重一次。
+* **`pairs` / `area_a` / `area_b` / `balanced` 仍然只统计整面对整面**（语义没动，
+  前面 20 个用例的基线全部保持），分段接触单独放在
+  `split_pairs` / `split_area_a` / `split_area_b`。
+* 所以带折流板的模型里，`balanced` 会显示 False、而 `split_pairs` > 0 —— 这是正常的，
+  看 `coverage` 和 `split_pairs`，别只看 `balanced`。
+* 代价：split 遍是 O(未配上的面 × 另一侧的面)，模型大时会慢一些。
+
+### 26.3 `cut=True` 是全局的 —— 带折流板的四层 CHT 顺序
+
+折流板做固体域时，它上面得有管孔，而 `cut=True` 会切**文档里所有体**，
+所以建体顺序决定一切：
+
+```
+① 建壳程流体（box）
+② 挖折流板槽（box cut=True）         <- 此时文档里只有壳体
+③ 折流板固体塞进槽里（box separate=True）
+④ 挖 12 个管孔（cylinder cut=True）  <- 刀同时穿透壳体和两块折流板，折流板天然带管孔
+⑤ 最后才建管壁与管程流体              <- 否则会被④的刀切到
+```
+
+实测（`examples/cht_baffled_demo.py`）：27 个体、`cht_check ok=True`，
+4 组相接全部自动判出；管孔壁总长 1182mm = 12×100 − 18
+（18 = 6 根管穿下挡板 2mm + 3 根管穿上挡板 2mm），面积 37133.63 与手算逐位相等。
+
+**折流板的边缘要放在管排之间的空档里**：第一版把折流板边缘正好压在管排中心线上，
+结果折流板边缘面被 3 根管子切成 4 片细碎小面（2~11 mm²），壳体面上的碎面从 6 涨到 14。
+空档宽度取决于管外径与管间距，自己算一下。

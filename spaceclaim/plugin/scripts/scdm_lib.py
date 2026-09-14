@@ -2978,51 +2978,123 @@ def _all_faces(target):
     return out
 
 
-def find_coincident_pairs_multi(bodies_a, bodies_b, tol=1e-3):
+def _face_contains(big, small, tol=1e-3):
+    """small 是不是**贴在 big 上、并且被 big 包住**（用来处理被切断的分段交界面）。
+
+    典型场景：管束里插了折流板，壳程流体的管孔壁被切成好几段，而管壁的外表面
+    还是完整的一根 100mm 圆柱面 —— 整面面积对不上，但每一段都确实贴在它上面。
+    """
+    if face_kind(big) != face_kind(small):
+        return False
+    lb, hb = face_extent(big)
+    ls, hs = face_extent(small)
+    for k in range(3):
+        if ls[k] < lb[k] - tol or hs[k] > hb[k] + tol:
+            return False
+    kind = face_kind(big)
+    cb = face_center(big)
+    cs = face_center(small)
+    if kind == "plane":
+        nb = face_normal(big)
+        ns = face_normal(small)
+        if nb is None or ns is None:
+            return False
+        if abs(nb[0] * ns[0] + nb[1] * ns[1] + nb[2] * ns[2]) < 1.0 - 1e-6:
+            return False
+        off = (nb[0] * (cs[0] - cb[0]) + nb[1] * (cs[1] - cb[1]) + nb[2] * (cs[2] - cb[2]))
+        return abs(off) <= tol
+    if kind == "cylinder":
+        # 不依赖 Geometry 的成员（反射取不到 Radius/Frame 时整条判定会静默失败），
+        # 改用**包围盒截面比对**：取大面最长的那个方向当轴向，剩下两个方向的尺寸
+        # 必须和小面一致（同轴同半径才会一致；小面套在大半径圆柱里就一致不了）。
+        ex = [hb[k] - lb[k] for k in range(3)]
+        ax = 0
+        for k in (1, 2):
+            if ex[k] > ex[ax]:
+                ax = k
+        for k in range(3):
+            if k == ax:
+                continue
+            if abs((hs[k] - ls[k]) - ex[k]) > max(tol, ex[k] * 1e-3):
+                return False
+        return True
+    return False
+
+
+def find_coincident_pairs_multi(bodies_a, bodies_b, tol=1e-3, allow_split=False):
     """跨**多个体**找出成对的交界面（面心与面积都吻合），返回 [(face_a, face_b), ...]。
 
     和单体的 `find_coincident_pairs` 相比：两侧都可以是一串体 —— 管束里
     "壳程流体上的 12 个管孔壁" 对 "12 个管壁体的外表面" 就是这种。
     用面心取整做哈希索引，不做 O(N*M) 的两两比较；同一边的每张面只会被配一次。
+
+    `allow_split=True` 时再做**第二遍**：处理"一侧一张面、另一侧被切成几段"的情况
+    （`_face_contains`）。典型场景是管束里插了折流板 —— 壳程的管孔壁被切成 3 段，
+    而管壁外表面仍是完整的 100mm 圆柱面，整面面积对不上，只有做包含判定才配得上。
+    第二遍是 O(未配上的面 × 另一侧的面)，模型大的时候会慢一些。
     """
     fa_list = _all_faces(bodies_a)
+    fb_list = _all_faces(bodies_b)
     index = {}
-    for fb in _all_faces(bodies_b):
+    for fb in fb_list:
         index.setdefault(_face_center_key(face_center(fb), tol), []).append(fb)
     pairs = []
-    used = {}
+    used_a = {}
+    used_b = {}
     for fa in fa_list:
         aa = face_area(fa)
         for fb in index.get(_face_center_key(face_center(fa), tol), []):
-            k = _face_key(fb)
-            if k in used:
+            kb = _face_key(fb)
+            if kb in used_b:
                 continue
             ab = face_area(fb)
             if abs(aa - ab) > tol * max(1.0, aa):
                 continue
-            used[k] = 1
+            used_a[_face_key(fa)] = 1
+            used_b[kb] = 1
             pairs.append((fa, fb))
             break
+
+    if allow_split:
+        # 分段接触：小面贴在大面上。**大面可以被多张小面共用**（一根管壁外表面
+        # 会被折流板切成好几段的壳程孔壁同时贴着），所以这里只对 A 侧去重。
+        for fa in fa_list:
+            ka = _face_key(fa)
+            if ka in used_a:
+                continue
+            for fb in fb_list:
+                if _face_contains(fb, fa, tol):
+                    used_a[ka] = 1
+                    pairs.append((fa, fb))
+                    break
     return pairs
 
 
-def interface_report(bodies_a, bodies_b, tol=1e-3, tol_loose=1.0, find_suspects=False):
+def interface_report(bodies_a, bodies_b, tol=1e-3, tol_loose=1.0, find_suspects=False,
+                     allow_split=False):
     """交界面**配平自检**，返回 dict：
 
       pairs      配上的面对数
+      split_pairs allow_split=True 时，其中"小面贴大面"（分段交界面）的条数
       area_a     配上的面在 A 侧的面积合计（mm²）
       area_b     配上的面在 B 侧的面积合计
-      balanced   两侧面积是否相等 —— **这才是"交界面配平"的真正判据**
+      coverage   min(area_a, area_b) / max(...) —— 两侧覆盖比
+      balanced   两侧面积是否相等（严格判据；分段交界面天然 <1，见下）
       suspects   [(face_a, face_b, area_a, area_b), ...]，**默认不查**（find_suspects=True 才填）
       faces_a / faces_b  两侧各自的面数（供参考，不是所有面都该配上）
 
     为什么要它：管束里几十张面配对，眼睛是数不清的；`pairs` 对不对、`area_a` 与
     `area_b` 是否相等，这两条就能把"少配了一根管""一侧多出一段"全部抓出来。
-    实测：12 根管的 CHT 模型两侧各 37699.11 mm²、`balanced=True`，而故意把管壁做长
+    实测：12 根管的 CHT 模型两侧各 37699.11 mm²、`balanced=True`；故意把管壁做长
     10mm 时两侧立刻变成 3455.75 vs 3141.59 一根、`balanced=False`。
 
+    **分段交界面要 `allow_split=True`**：管束里插了折流板之后，壳程那侧的管孔壁被
+    切成几段（每根管少 2mm×折流板数），而管壁外表面还是完整的 100mm 圆柱面 ——
+    严格面积判据下 `balanced` 永远是 False（实测 coverage ≈ 0.96，缺的 4% 正是折流板
+    贴住的那两小段）。这时候看 `coverage`，别只看 `balanced`。
+
     `suspects` 为什么默认关：它的判据是"面心很接近但面积差 >1%"，而**同心的圆盘和圆环
-    天然会落进来**——实测在上面那个完全正确的模型里它报了 36 条假阳性
+    天然会落进来**——实测在一个完全正确的模型里它报了 36 条假阳性
     （管壁端面环 28.27 mm² vs 管程端面圆盘 50.27 mm²，圆心正好重合）。
     只有在你怀疑"一侧一张面、另一侧被切成两张"时才打开它，而且**要一条条看**。
     """
@@ -3032,6 +3104,33 @@ def interface_report(bodies_a, bodies_b, tol=1e-3, tol_loose=1.0, find_suspects=
     for (fa, fb) in pairs:
         area_a += face_area(fa)
         area_b += face_area(fb)
+    hi = max(area_a, area_b)
+    coverage = 0.0 if hi <= 0.0 else min(area_a, area_b) / hi
+
+    # 分段接触单独统计，**不混进 area_a/area_b/balanced** —— 那条判据的语义是
+    # "整面对整面、两侧面积相等"，混进来会让它没法用。
+    split_pairs = 0
+    split_area_a = 0.0
+    split_area_b = 0.0
+    if allow_split:
+        exact = {}
+        for (fa, fb) in pairs:
+            exact[(_face_key(fa), _face_key(fb))] = 1
+        allp = find_coincident_pairs_multi(bodies_a, bodies_b, tol, allow_split=True)
+        seen_a = {}
+        seen_b = {}
+        for (fa, fb) in allp:
+            if (_face_key(fa), _face_key(fb)) in exact:
+                continue
+            split_pairs += 1
+            ka = _face_key(fa)
+            if ka not in seen_a:
+                seen_a[ka] = 1
+                split_area_a += face_area(fa)
+            kb = _face_key(fb)
+            if kb not in seen_b:
+                seen_b[kb] = 1
+                split_area_b += face_area(fb)
 
     suspects = []
     if find_suspects:
@@ -3061,8 +3160,12 @@ def interface_report(bodies_a, bodies_b, tol=1e-3, tol_loose=1.0, find_suspects=
 
     return {
         "pairs": len(pairs),
+        "split_pairs": split_pairs,
+        "split_area_a": split_area_a,
+        "split_area_b": split_area_b,
         "area_a": area_a,
         "area_b": area_b,
+        "coverage": coverage,
         "balanced": len(pairs) > 0 and abs(area_a - area_b) <= tol * max(1.0, area_a),
         "suspects": suspects,
         "faces_a": len(_all_faces(bodies_a)),
@@ -3138,25 +3241,199 @@ def interface_gaps(bodies_a, bodies_b, tol=1e-3):
     return gaps
 
 
-def name_interfaces_multi(bodies_a, bodies_b, prefix="interface", grouped=True, tol=1e-3):
+def interface_graph(bodies, tol=1e-3):
+    """体与体之间的**共享面邻接表**：{体键: [(邻体, 面数, 面积 mm²), ...]}。
+
+    用来回答"这个体到底跟谁贴着"。管束里一根管子该贴 2 个（壳程流体 + 管程流体），
+    折流板该贴 3 个（壳程流体 + 它穿过的每根管壁）。返回的是 dict，键是 Moniker，
+    值的第一项是体对象本身不方便序列化，所以提供 `interface_neighbours()` 这个名字列表版。
+    """
+    items = _as_body_list(bodies)
+    fmap = _face_body_map(items)
+    pairs = find_coincident_pairs_multi(items, items, tol)
+    acc = {}
+    for (fa, fb) in pairs:
+        ba = fmap.get(_face_key(fa))
+        bb = fmap.get(_face_key(fb))
+        if ba is None or bb is None:
+            continue
+        ka = _body_key(ba)
+        kb = _body_key(bb)
+        if ka == kb:
+            continue
+        a = acc.setdefault(ka, {})
+        rec = a.get(kb)
+        if rec is None:
+            a[kb] = [0, 0.0]
+            rec = a[kb]
+        rec[0] += 1
+        rec[1] += face_area(fa)
+    return acc
+
+
+def interface_neighbours(bodies, tol=1e-3):
+    """和 `interface_graph` 同源，但返回 {(体名, 序号): [(邻体名, 面数, 面积), ...]}。
+
+    体名可能重复（12 根都叫 TubeWall），所以键里带一个序号。
+    """
+    items = _as_body_list(bodies)
+    graph = interface_graph(items, tol)
+    order = {}
+    names = []
+    for i in range(len(items)):
+        b = items[i]
+        order[_body_key(b)] = i
+        nm = _ascii(b.Name)
+        if names.count(nm) > 0:
+            nm = "%s#%d" % (nm, i)
+        names.append(nm)
+    out = {}
+    for i in range(len(items)):
+        b = items[i]
+        nb = graph.get(_body_key(b), {})
+        row = []
+        for kb in nb.keys():
+            j = order.get(kb)
+            if j is None:
+                continue
+            row.append((names[j], nb[kb][0], nb[kb][1]))
+        out[names[i]] = row
+    return out
+
+
+def cht_check(layers, tol=1e-3, allow_split=True, min_coverage=0.9):
+    """多体共轭传热的**自动分层检查**。
+
+    layers 是有序的 [(层名, [体...]), ...]。顺序只影响报告顺序，不影响结果。
+    自动做四件事，**不需要你指定哪两层相接**：
+
+      1. 每一对层之间算交界面：`pairs` / `split_pairs` / 两侧面积 / `coverage` / `balanced`
+      2. 把**一张交界面都没有**的层对列出来（"这两层根本没接触"）
+      3. 逐体统计**邻居层**：只贴到 1 层的体在外边界上；**一层都贴不到的体直接点名**
+      4. 汇总每层的体数 / 面数 / 总面积
+
+    参数 `allow_split=True`（默认）会启用分段交界面的包含式匹配 —— 带折流板的模型
+    必须用它，否则壳程那侧被切成几段的管孔壁一个都配不上。`min_coverage` 是判定
+    "这两层算不算真接触"的覆盖比下限（默认 0.9）：分段交界面天然不到 1
+    （实测带折流板模型 coverage ≈ 0.96，缺的 4% 正是折流板贴住的那两小段）。
+
+    返回 dict::
+
+        {
+          "pairs": {(层a, 层b): report},                 # 每个层对的 interface_report
+          "touching": [(层a, 层b, 面数, coverage), ...],  # 相接的层对
+          "not_touching": [(层a, 层b), ...],             # 没接触的层对
+          "isolated_bodies": [(层名, 体名), ...],         # 一张交界面都没配上的体
+          "layer_stats": {层名: {"bodies":…, "faces":…, "area":…}},
+          "low_coverage": [(层a, 层b, coverage), ...],   # 接触了但覆盖不足
+          "ok": True/False,                              # 无孤立体 且 无覆盖不足
+        }
+    """
+    norm = []
+    for pair in layers:
+        name = str(pair[0])
+        norm.append((name, _as_body_list(pair[1])))
+    names = [n for (n, _b) in norm]
+
+    pairs_report = {}
+    touching = []
+    not_touching = []
+    low_coverage = []
+    for i in range(len(norm)):
+        for j in range(i + 1, len(norm)):
+            na, ba = norm[i]
+            nb, bb = norm[j]
+            rep = interface_report(ba, bb, tol, allow_split=allow_split)
+            pairs_report[(na, nb)] = rep
+            if rep["pairs"] > 0 or rep["split_pairs"] > 0:
+                cnt = rep["pairs"] + rep["split_pairs"]
+                arc = rep["area_a"] + rep["split_area_a"]
+                touching.append((na, nb, cnt, arc))
+                # 整面对整面但不配平 -> 记一笔；分段接触不看 area 判据（两侧本来就不等）
+                if rep["pairs"] > 0 and rep["split_pairs"] == 0 and not rep["balanced"]:
+                    low_coverage.append((na, nb, rep["coverage"]))
+            else:
+                not_touching.append((na, nb))
+
+    isolated = []
+    for (name, bodies) in norm:
+        if not bodies:
+            continue
+        others = []
+        for (n2, b2) in norm:
+            if n2 != name:
+                others.extend(b2)
+        if not others:
+            continue
+        fmap = _face_body_map(list(bodies) + list(others))
+        hit = {}
+        for (fa, fb) in find_coincident_pairs_multi(bodies, others, tol,
+                                                    allow_split=allow_split):
+            for f in (fa, fb):
+                b = fmap.get(_face_key(f))
+                if b is not None:
+                    hit[_body_key(b)] = 1
+        for b in bodies:
+            if _body_key(b) not in hit:
+                isolated.append((name, _ascii(b.Name)))
+
+    layer_stats = {}
+    for (name, bodies) in norm:
+        nf = 0
+        area = 0.0
+        for b in bodies:
+            try:
+                for f in b.Faces:
+                    nf += 1
+                    area += face_area(f)
+            except:
+                pass
+        layer_stats[name] = {"bodies": len(bodies), "faces": nf, "area": area}
+
+    return {
+        "pairs": pairs_report,
+        "touching": touching,
+        "not_touching": not_touching,
+        "isolated_bodies": isolated,
+        "layer_stats": layer_stats,
+        "low_coverage": low_coverage,
+        "ok": (len(isolated) == 0 and len(low_coverage) == 0),
+    }
+
+
+def name_interfaces_multi(bodies_a, bodies_b, prefix="interface", grouped=True,
+                          tol=1e-3, allow_split=False):
     """跨**多个体**命名交界面，返回配对数。
 
     grouped=True（默认）：两侧各做成**一个**命名选择 —— `<prefix>_a` / `<prefix>_b`。
         管束那种几十张面配对的场景，Fluent 里要的就是"一对 zone"，而不是几十对。
+        B 侧会**按面去重**（分段接触时一张大面会被好几张小面共用）。
     grouped=False：逐对命名 `<prefix>_a1` / `<prefix>_b1` …（需要逐管单独控制时用）
+
+    `allow_split=True` 时把"小面贴在大面上"的分段接触也算进来 —— 带折流板的模型
+    必须开，否则壳程那边被折流板切开的管孔壁一张都不会被命名。
 
     典型用法（壳程流体 ↔ 管壁固体）：
 
-        n = name_interfaces_multi(shell_side, tube_walls, "shell_tube")
-        r = interface_report(shell_side, tube_walls)
-        assert r["balanced"], r
+        n = name_interfaces_multi(shell_side, tube_walls, "shell_tube", allow_split=True)
+        r = interface_report(shell_side, tube_walls, allow_split=True)
+        assert r["pairs"] + r["split_pairs"] > 0, r
     """
-    pairs = find_coincident_pairs_multi(bodies_a, bodies_b, tol)
+    pairs = find_coincident_pairs_multi(bodies_a, bodies_b, tol, allow_split=allow_split)
     if not pairs:
         return 0
     if grouped:
-        name_faces("%s_a" % prefix, [p[0] for p in pairs])
-        name_faces("%s_b" % prefix, [p[1] for p in pairs])
+        a_faces = []
+        b_faces = []
+        seen_b = {}
+        for (fa, fb) in pairs:
+            a_faces.append(fa)
+            kb = _face_key(fb)
+            if kb not in seen_b:
+                seen_b[kb] = 1
+                b_faces.append(fb)
+        name_faces("%s_a" % prefix, a_faces)
+        name_faces("%s_b" % prefix, b_faces)
     else:
         for idx in range(len(pairs)):
             fa, fb = pairs[idx]

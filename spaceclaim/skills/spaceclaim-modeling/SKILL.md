@@ -31,7 +31,7 @@ name_boundaries(body, bottom="inlet", top="outlet", sides="wall", axis="z")
 finish(r"E:\path\model.scdocx", body)                          # 必须：保存 + 打印成功哨兵
 ```
 
-Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `all_components` / `component_children` / `explode_to_components` / `assembly_summary` in §1h, and `name_interfaces_multi` / `interface_report` / `interface_pairing_by_body` / `interface_gaps` / `find_coincident_pairs_multi` in §1j, plus the `smoke_examples.ps1` one-command example run in §1k.
+Available helpers: `new_model`, `ensure_document`, `box`, `cylinder`, `tube`, `sphere`, `stepped_cone`, `cone_frustum`, `cone_frustums`, `elbow`, `elbows`, `torus`, `revolve_profile`, `revolve_profiles`, `extrude_circle`, `polygon_prism`, `polygon_prisms`, `profile_prisms`, `move`, `rotate`, `split_face_by_points`, `split_face_by_line`, `split_face_by_body`, `split_body_by_plane`, `face_center`, `face_extent`, `face_area`, `face_normal`, `face_kind`, `body_extent`, `body_size`, `faces_where`, `faces_at`, `faces_between`, `faces_by_normal`, `faces_by_kind`, `faces_by_area`, `faces_in_box`, `face_at_point`, `nearest_face`, `match_faces`, `faces_match`, `find_coincident_pairs`, `name_faces`, `name_face_pair`, `name_faces_by_rules`, `name_boundaries`, `name_interfaces`, `name_internal_baffle`, `save_model`, `group_summary`, `finish`, plus the edge/round set in §1d, the bend set in §1e, `shell` in §1f, and `array_linear` / `array_circular` / `mirror` in §1g, plus `rect_surface` / `circle_surface` / `thicken` / `component` / `move_to_component` / `move_to_root` / `component_bodies` / `all_bodies` / `all_components` / `component_children` / `explode_to_components` / `assembly_summary` in §1h, and `name_interfaces_multi` / `interface_report` / `interface_pairing_by_body` / `interface_gaps` / `find_coincident_pairs_multi` in §1j, plus `interface_graph` / `interface_neighbours` / `cht_check` in §1j and the `smoke_examples.ps1` one-command example run in §1l.
 
 **Sketch-based bodies must come first.** `polygon_prism` / `polygon_prisms` / `extrude_circle` all drive SpaceClaim's sketch tool, and on 2022 R1 **a new sketch crashes the script once the document already contains a solid** (measured: a null-reference abort straight out of `SketchPolygon.Create`, with only an empty `Script failed:` in the app log). They also cannot be called twice in a row — all profiles have to be sketched before any solid exists, which is exactly what the batch form does:
 
@@ -472,7 +472,70 @@ gap = interface_gaps([tube_walls[0], misplaced], shell)       # 一张面都没�
 - `interface_pairing_by_body` 按传入顺序逐体给出**面数 + 面积**，一眼看出哪根没配上、哪根面积不对。
 - `interface_gaps` 按**体**判"一张交界面都没配上"。实测把一根管子只插进去一半（x 20..80、孔是 0..100）时它被点名；而壳体那边即使 4 张孔壁只配上 1 张也**不算孤立体**——它是按体判的，不是按面判的，这点要知道。
 
-## 1k. 一条命令跑完所有示例
+### 自动分层检查（不用指定哪两层相接）
+
+```python
+rep = cht_check([
+    ("shell_fluid",  [shell]),
+    ("baffle_solid", baffles),
+    ("tube_wall",    tube_walls),
+    ("tube_fluid",   tube_side),
+])
+print(rep["ok"], rep["touching"], rep["isolated_bodies"], rep["low_coverage"])
+```
+
+`cht_check` 对**每一对层**自动算交界面，所以你不必告诉它"壳程跟管壁相接"。返回
+`touching`（相接的层对）/ `not_touching` / `isolated_bodies`（一张交界面都没配上的体，点名）
+/ `layer_stats` / `low_coverage` / `ok`。
+
+实测（第 21 个用例，壳程 60×36×24 + 1 块折流板 + 4 根管）：
+
+| 层对 | 结果 | 手算 |
+|---|---|---|
+| 壳程 ↔ 管壁 | 整面 2 对 + **分段 4 对**，面积 5931.33 | 4×60 − 2×2 = 236mm 长 → 2πr·236 |
+| 壳程 ↔ 折流板 | 3 对，566.94 | 2 张板面各 259.47 + 1 张板底 48（折流板焊在壳体底面上） |
+| 折流板 ↔ 管壁 | **分段 2 对**，100.53 | 2 个管孔 × 2πr·2 |
+| 管壁 ↔ 管程 | 整面 4 对，4523.89 | 4 × 2πr·60 |
+| 壳程 ↔ 管程 | **正确地判为"不接触"** | 中间隔着管壁 |
+
+### 分段交界面：`allow_split=True`
+
+管束里插了折流板之后，**壳程那侧的管孔壁会被切成几段**（每根管少 2mm×折流板数），
+而管壁外表面还是完整的一根 100mm 圆柱面 —— 整面面积对不上，自动配对会是 **0**。
+这时要开分段匹配：
+
+```python
+name_interfaces_multi(shell, tube_walls, "shell_tube", allow_split=True)   # 3 整 + 18 分段
+r = interface_report(shell, tube_walls, allow_split=True)
+print(r["pairs"], r["split_pairs"], r["split_area_a"], r["area_a"])
+```
+
+分段匹配靠"小面被大面包住"判定（平面比法向 + 平面方程；圆柱比包围盒截面尺寸，
+不依赖几何反射——反射取不到 `Radius` 时整条判定会静默失败）。
+**`pairs` / `area_a` / `area_b` / `balanced` 仍然只统计整面对整面**，分段接触单独放在
+`split_pairs` / `split_area_a` / `split_area_b`，两者的语义不会混。
+
+命名时 B 侧会**按面去重**（一根管壁的外表面被好几段同时贴着，只能算一次）。
+
+### 四层带折流板的完整配方（`examples/cht_baffled_demo.py`）
+
+折流板不只是"挖个槽当墙"——它也可以是**固体域**（共轭传热要算它的导热）。难点是
+折流板上得有管孔，而 `cut=True` 是**全局的**，所以顺序决定一切：
+
+```
+① 建壳程流体（box）
+② 挖折流板槽（box cut）—— 此时文档里只有壳体
+③ 把折流板固体塞进槽里（box separate=True）
+④ 这一轮挖 12 个管孔 —— 刀同时穿透壳体和两块折流板 ✓ 折流板天然带管孔
+⑤ 最后才建管壁和管程流体（否则会被④的刀切到）
+```
+
+实测：27 个体，`cht_check ok=True`，自动判定 4 组相接
+（壳程↔折流板 6 对 / 壳程↔管壁 3 整 + 18 分段 / 折流板↔管壁 9 分段 / 管壁↔管程 12 对），
+并正确判定**壳程↔管程不接触**。管孔壁的总长度 1182mm = 12×100 − 18（18 = 6 根管穿下挡板 2mm + 3 根管穿上挡板 2mm），
+面积 37133.63 与手算逐位相等。
+
+## 1l. 一条命令跑完所有示例
 
 ```powershell
 & "<skill-dir>\scripts\smoke_examples.ps1"                 # 全部 5 个示例
@@ -565,9 +628,10 @@ $S = "$env:USERPROFILE\.dsh\skills\spaceclaim-modeling"
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_array.py"         -Out "$S\tests\selftest_array.scdocx"         -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_surface_asm.py"   -Out "$S\tests\selftest_surface_asm.scdocx"   -Verify
 & "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_cht.py"           -Out "$S\tests\selftest_cht.scdocx"           -Verify
+& "$S\scripts\Invoke-Scdm.ps1" -Script "$S\tests\selftest_cht_baffled.py"   -Out "$S\tests\selftest_cht_baffled.scdocx"   -Verify
 ```
 
-All twenty must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
+All twenty-one must end in `[scdm] status=ok` and print the verify block. Regression baseline — these exact values came from real runs, so any drift means something in the pipeline broke:
 
 | case | read-back size | named selections (face centre / area) |
 |---|---|---|
@@ -590,6 +654,7 @@ All twenty must end in `[scdm] status=ok` and print the verify block. Regression
 | `selftest_shell` | 7 bodies: `HollowCube 20³` (12 faces) · `OpenCup 20³` (11) · `OpenDuct 20³` (10) · `HollowCyl 20×20×20` (6 — 4 plane + 2 cylinder) · `Outward 24³` (12) · `TooThick 20³` (6 — t=11 refused, untouched) · `PreNamed 20³` (11) | hollow_outer 6 × 400.00 · hollow_cavity 6 × 256.00 @ ±2 · cup_rim 144.00 @ (50,10,20) · cup_outer 5 × 400.00 · cup_inner 5 面 · duct_rim/duct_rim2 各 144.00 @ z=20/z=0 · duct_outer 4 × 400.00 · duct_inner 4 × 320.00 · pre_outlet 被重映射成 144.00 |
 | `selftest_array` | 22 bodies: `Pin_1..4` (各 6 面) · `Fin_1..6` (6) · `Blade_1..6` (6) · `Half` (合并后 1 体 20×10×10) · `Half2` + `Half2Mirror` · `BankDomain 60×40×30` (**15 面**) | bank_inlet/bank_outlet 各 1200.00 @ (700,20,15)/(760,20,15) · bank_tubes **9 × 565.49** @ 706/718/730 × 6/18/30 · bank_wall 4 面（1800 / 1800 / 2145.53 / 2145.53） |
 | `selftest_cht` | 10 bodies: `ShellSide 60×36×24` (**10 面** = 6 平面 + 4 个管孔壁) · `TubeWall` ×4 (各 4 面) · `TubeSide` ×4 (各 3 面) · `ProbeSide 68×6×6`（故意做长 8mm 的对照体） | shell_tube_a/b 各 4 × 1507.96 · tube_fluid_a/b 各 4 × 1130.97 · shell_inlet 662.94 · shell_wall 4 面 · tube_wall_end 8 面 · 对照体 pairs=0 balanced=False |
+| `selftest_cht_baffled` | 10 bodies: `ShellFluid 60×36×24` · `Baffle 2×15×24` · `TubeWall` ×4 · `TubeSide` ×4 | 自动分层判定 4 组相接：壳程↔管壁 整面2/分段4 面积 5931.33 · 壳程↔折流板 3 对 566.94 · 折流板↔管壁 分段2 100.53 · 管壁↔管程 整面4 4523.89；壳程↔管程**正确地判为不接触**；zones=14 |
 | `selftest_surface_asm` | 7 bodies: `RectSurf 20×10×2` (6 面) · `CircSurf 20×20×0` (**1 面**) · `SymSurf 40×40×8` (6) · `PullMe 20×20×25` (6) · `Baffle 30×1×20` (6) · `CompA` · `CompB` (各 6) | baffle_a/baffle_b 各 150.00（30×5? 见 verify）· baffle_edge 4 面 |
 
 Run these before blaming a new model script.
